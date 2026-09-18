@@ -1,6 +1,5 @@
 package main
 
-import "core:os"
 import "core:sync/chan"
 import "core:thread"
 
@@ -11,19 +10,53 @@ Git_Waker :: struct {
 	wake: Git_Wake_Proc,
 }
 
+// Each request domain has its own one-slot latest-wins lane. Results mirror
+// those lanes so a burst of detail requests cannot evict the only current
+// history snapshot (or vice versa).
 Git_Worker :: struct {
-	requests: chan.Chan(^Git_Request),
-	results:  chan.Chan(^History_Result),
-	thread:   ^thread.Thread,
-	waker:    Git_Waker,
-	started:  bool,
+	stop:             chan.Chan(^Git_Request),
+	history_requests: chan.Chan(^Git_Request),
+	detail_requests:  chan.Chan(^Git_Request),
+	history_results:  chan.Chan(^History_Result),
+	detail_results:   chan.Chan(^History_Result),
+	thread:           ^thread.Thread,
+	waker:            Git_Waker,
+	started:          bool,
+}
+
+git_worker_destroy_result :: proc(result: ^History_Result) {
+	if result == nil { return }
+	history_result_destroy(result)
+	free(result)
+}
+
+git_worker_deliver :: proc(worker: ^Git_Worker, result: ^History_Result) -> bool {
+	results := worker.history_results if result.kind == .Load_History else worker.detail_results
+	if chan.try_send(results, result) { return true }
+	// A result already waiting in this same domain is obsolete. Never consume
+	// the other domain's mailbox to make room.
+	old, ok := chan.try_recv(results)
+	if ok { git_worker_destroy_result(old) }
+	return chan.try_send(results, result)
 }
 
 git_worker_proc :: proc(data: rawptr) {
 	worker := cast(^Git_Worker)data
+	receive_channels := [?]^chan.Raw_Chan{
+		worker.stop.impl,
+		worker.history_requests.impl,
+		worker.detail_requests.impl,
+	}
 	for {
-		request, ok := chan.recv(worker.requests)
-		if !ok || request == nil { break }
+		received: rawptr
+		selected, status := chan.try_select_raw(receive_channels[:], nil, nil, &received)
+		for status == .None {
+			thread.yield()
+			selected, status = chan.try_select_raw(receive_channels[:], nil, nil, &received)
+		}
+		if status != .Recv || selected < 0 || selected == 0 { break }
+		request := cast(^Git_Request)received
+		if request == nil { continue }
 		result := new(History_Result)
 		result.kind = request.kind
 		result.history_id = request.history_id
@@ -53,21 +86,8 @@ git_worker_proc :: proc(data: rawptr) {
 			result.detail, result.error_text = git_load_commit_detail(result.repository, commit_id)
 		}
 		if len(commit_id) > 0 { delete(commit_id) }
-		delivered := chan.try_send(worker.results, result)
-		if !delivered {
-			// Keep the mailbox bounded without blocking shutdown. A newer
-			// snapshot supersedes an older one, so discard one queued result
-			// and retry delivery before giving up.
-			old_result, dropped := chan.try_recv(worker.results)
-			if dropped && old_result != nil {
-				history_result_destroy(old_result)
-				free(old_result)
-			}
-			delivered = chan.try_send(worker.results, result)
-		}
-		if !delivered {
-			history_result_destroy(result)
-			free(result)
+		if !git_worker_deliver(worker, result) {
+			git_worker_destroy_result(result)
 			continue
 		}
 		if worker.waker.wake != nil {
@@ -77,8 +97,11 @@ git_worker_proc :: proc(data: rawptr) {
 }
 
 git_worker_start :: proc(worker: ^Git_Worker) -> bool {
-	worker.requests, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
-	worker.results, _ = chan.create_buffered(chan.Chan(^History_Result), 2, context.allocator)
+	worker.stop, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
+	worker.history_requests, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
+	worker.detail_requests, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
+	worker.history_results, _ = chan.create_buffered(chan.Chan(^History_Result), 1, context.allocator)
+	worker.detail_results, _ = chan.create_buffered(chan.Chan(^History_Result), 1, context.allocator)
 	worker.thread = thread.create_and_start_with_data(rawptr(worker), git_worker_proc, name="alicorn-history-git")
 	worker.started = worker.thread != nil
 	return worker.thread != nil
@@ -88,45 +111,60 @@ git_worker_set_waker :: proc(worker: ^Git_Worker, waker: Git_Waker) {
 	worker.waker = waker
 }
 
+git_worker_replace_request :: proc(queue: chan.Chan(^Git_Request), request: ^Git_Request) -> bool {
+	old, ok := chan.try_recv(queue)
+	if ok { git_request_destroy(old) }
+	if chan.try_send(queue, request) { return true }
+	old, ok = chan.try_recv(queue)
+	if ok { git_request_destroy(old) }
+	return chan.try_send(queue, request)
+}
+
 git_worker_request :: proc(worker: ^Git_Worker, request: ^Git_Request) -> bool {
 	if worker == nil || !worker.started || request == nil { return false }
-	// Latest work wins. A request still being executed cannot be canceled
-	// safely, but anything waiting in the one-slot mailbox is obsolete once
-	// this request arrives.
-	for {
-		queued, ok := chan.try_recv(worker.requests)
-		if !ok { break }
-		git_request_destroy(queued)
+	switch request.kind {
+	case .Load_History:
+		return git_worker_replace_request(worker.history_requests, request)
+	case .Load_Commit_Detail:
+		return git_worker_replace_request(worker.detail_requests, request)
 	}
-	if chan.try_send(worker.requests, request) { return true }
-	queued, ok := chan.try_recv(worker.requests)
-	if ok { git_request_destroy(queued) }
-	if chan.try_send(worker.requests, request) { return true }
 	return false
+}
+
+git_worker_drain_requests :: proc(queue: chan.Chan(^Git_Request)) {
+	for {
+		request, ok := chan.try_recv(queue)
+		if !ok { break }
+		git_request_destroy(request)
+	}
+}
+
+git_worker_drain_results :: proc(queue: chan.Chan(^History_Result)) {
+	for {
+		result, ok := chan.try_recv(queue)
+		if !ok { break }
+		git_worker_destroy_result(result)
+	}
 }
 
 git_worker_destroy :: proc(worker: ^Git_Worker) {
 	if !worker.started { worker^ = {}; return }
 	if worker.thread != nil {
-		// Clear queued work before inserting the shutdown sentinel. The worker
-		// may still be inside one Git process, but it will observe nil next
-		// instead of replaying obsolete refresh/detail requests.
-		for {
-			if chan.try_send(worker.requests, nil) { break }
-			queued, ok := chan.try_recv(worker.requests)
-			if !ok { continue }
-			git_request_destroy(queued)
-		}
+		// Drop all queued work in both domains before waking the worker to stop.
+		// The currently running Git process is allowed to finish, but no stale
+		// request can delay shutdown after that process returns.
+		git_worker_drain_requests(worker.history_requests)
+		git_worker_drain_requests(worker.detail_requests)
+		_ = chan.try_send(worker.stop, nil)
 		thread.join(worker.thread)
 		thread.destroy(worker.thread)
 	}
-	for {
-		result, ok := chan.try_recv(worker.results)
-		if !ok || result == nil { break }
-		history_result_destroy(result)
-		free(result)
-	}
-	_ = chan.destroy(worker.requests.impl)
-	_ = chan.destroy(worker.results.impl)
+	git_worker_drain_results(worker.history_results)
+	git_worker_drain_results(worker.detail_results)
+	_ = chan.destroy(worker.stop.impl)
+	_ = chan.destroy(worker.history_requests.impl)
+	_ = chan.destroy(worker.detail_requests.impl)
+	_ = chan.destroy(worker.history_results.impl)
+	_ = chan.destroy(worker.detail_results.impl)
 	worker^ = {}
 }

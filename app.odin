@@ -14,10 +14,13 @@ History_App :: struct {
 	filter:              string,
 	selected_id:         string,
 	has_selection:       bool,
+	selected_commit_index: int,
 	scroll_y:            f32,
 	list_viewport_height: f32,
 	row_height:          f32,
 	filter_node:         alicorn.Node_ID,
+	history_scroll_node: alicorn.Node_ID,
+	detail_scroll_node:  alicorn.Node_ID,
 	loading:             bool,
 	error_text:          string,
 	next_history_id:     History_Request_ID,
@@ -44,6 +47,7 @@ history_app_new :: proc(repository: string) -> ^History_App {
 	}
 	app.repository = copy
 	app.row_height = 44
+	app.selected_commit_index = -1
 	app.list_viewport_height = 560
 	app.visible = make([dynamic]int, 0, 1024)
 	return app
@@ -115,6 +119,7 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 	app.detail_error = ""
 	app.detail_loading = false
 	app.detail_files_scroll_y = 0
+	app.detail_scroll_node = 0
 }
 
 history_invalidate_detail :: proc(app: ^History_App) {
@@ -125,9 +130,9 @@ history_invalidate_detail :: proc(app: ^History_App) {
 
 history_worker_submit_detail :: proc(app: ^History_App) -> bool {
 	if !app.has_selection { return false }
-	selected := -1
-	for commit, index in app.commits {
-		if commit.id == app.selected_id { selected = index; break }
+	selected := app.selected_commit_index
+	if selected < 0 || selected >= len(app.commits) || app.commits[selected].id != app.selected_id {
+		selected = -1
 	}
 	if selected < 0 { history_invalidate_detail(app); return false }
 
@@ -230,12 +235,16 @@ history_poll_results :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
 	changed := false
 	history_changed := false
 	for {
-		result, ok := chan.try_recv(app.worker.results)
+		result, ok := chan.try_recv(app.worker.history_results)
 		if !ok || result == nil { break }
-		is_history := result.kind == .Load_History
+		accepted := history_adopt_result(app, result)
+		if accepted { changed = true; history_changed = true }
+	}
+	for {
+		result, ok := chan.try_recv(app.worker.detail_results)
+		if !ok || result == nil { break }
 		accepted := history_adopt_result(app, result)
 		if accepted { changed = true }
-		if accepted && is_history { history_changed = true }
 	}
 	if history_changed && app.has_selection {
 		// A refresh may replace the selected commit's metadata while keeping
@@ -260,8 +269,10 @@ history_rebuild_visible :: proc(app: ^History_App) {
 	}
 	if app.has_selection {
 		found := false
-		for index in app.visible {
-			if app.commits[index].id == app.selected_id {
+		app.selected_commit_index = -1
+		for commit, index in app.commits {
+			if commit.id == app.selected_id {
+				app.selected_commit_index = index
 				found = true
 				break
 			}
@@ -270,6 +281,7 @@ history_rebuild_visible :: proc(app: ^History_App) {
 			delete(app.selected_id)
 			app.selected_id = ""
 			app.has_selection = false
+			app.selected_commit_index = -1
 		}
 	}
 	metrics := alicorn.virtual_list_metrics(len(app.visible), app.scroll_y, app.list_viewport_height, app.row_height)
@@ -305,6 +317,7 @@ history_select_visible_index :: proc(app: ^History_App, position: int) {
 	if len(app.selected_id) > 0 { delete(app.selected_id) }
 	app.selected_id = copy
 	app.has_selection = true
+	app.selected_commit_index = app.visible[position]
 	if position < int(app.scroll_y / app.row_height) {
 		app.scroll_y = f32(position) * app.row_height
 	} else if f32(position+1)*app.row_height > app.scroll_y+app.list_viewport_height {
@@ -319,7 +332,7 @@ history_move_selection :: proc(app: ^History_App, delta: int) -> bool {
 	position := 0
 	if app.has_selection {
 		for i, index in app.visible {
-			if app.commits[index].id == app.selected_id {
+			if index == app.selected_commit_index {
 				position = i
 				break
 			}
@@ -345,30 +358,6 @@ history_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alic
 	alicorn.invalidate_root(rt, "history filter changed")
 }
 
-history_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scroll_Event) {
-	app := cast(^History_App)state
-	delta := event.delta_y
-	if event.ticks_y != 0 { delta = f32(event.ticks_y) * 3 }
-	if event.x >= 515 && app.has_selection && len(app.detail.files) > 0 {
-		old_scroll := app.detail_files_scroll_y
-		requested := old_scroll - delta * app.row_height
-		metrics := alicorn.virtual_list_metrics(len(app.detail.files), requested, app.detail_file_viewport_height, app.row_height)
-		if metrics.offset_y != old_scroll {
-			app.detail_files_scroll_y = metrics.offset_y
-			alicorn.invalidate_root(rt, "history detail file scroll")
-		}
-		return
-	}
-	if event.y < 120 { return }
-	old_scroll := app.scroll_y
-	requested := old_scroll - delta * app.row_height
-	metrics := alicorn.virtual_list_metrics(len(app.visible), requested, app.list_viewport_height, app.row_height)
-	if metrics.offset_y != old_scroll {
-		app.scroll_y = metrics.offset_y
-		alicorn.invalidate_root(rt, "history scroll")
-	}
-}
-
 history_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> bool {
 	app := cast(^History_App)state
 	delta := 0
@@ -382,6 +371,7 @@ history_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Applicatio
 	changed := history_move_selection(app, delta)
 	if changed {
 		_ = history_worker_submit_detail(app)
+		_ = alicorn.scroll_region_set_offset(rt, app.history_scroll_node, app.scroll_y, "history selection visibility")
 		alicorn.invalidate_root(rt, "history selection changed")
 	}
 	return changed

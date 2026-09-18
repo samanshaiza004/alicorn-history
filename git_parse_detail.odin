@@ -169,9 +169,17 @@ git_load_commit_detail :: proc(repository, commit_id: string) -> (detail: Commit
 	if len(stderr) > 0 { delete(stderr) }
 	if len(error_text) > 0 { return }
 
-	numstat, numstat_stderr, numstat_exit, numstat_ok := git_run(repository, []string{
-		"diff-tree", "--root", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames", commit_id,
-	})
+	// History presents every commit as a change from its first parent. This
+	// keeps merge commits deterministic and consistent with the later patch
+	// viewer; root commits compare the empty tree against the commit.
+	diff_prefix := []string{"diff-tree", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames"}
+	diff_args := []string{}
+	if len(detail.parents) == 0 {
+		diff_args = []string{"diff-tree", "--root", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames", commit_id}
+	} else {
+		diff_args = []string{diff_prefix[0], diff_prefix[1], diff_prefix[2], diff_prefix[3], diff_prefix[4], diff_prefix[5], detail.parents[0], commit_id}
+	}
+	numstat, numstat_stderr, numstat_exit, numstat_ok := git_run(repository, diff_args)
 	if !numstat_ok {
 		commit_detail_destroy(&detail)
 		error_text = git_error_text(numstat_stderr, numstat_exit)
@@ -188,9 +196,13 @@ git_load_commit_detail :: proc(repository, commit_id: string) -> (detail: Commit
 		return
 	}
 
-	status_data, status_stderr, status_exit, status_ok := git_run(repository, []string{
-		"diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", commit_id,
-	})
+	status_args := []string{}
+	if len(detail.parents) == 0 {
+		status_args = []string{"diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", commit_id}
+	} else {
+		status_args = []string{"diff-tree", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", detail.parents[0], commit_id}
+	}
+	status_data, status_stderr, status_exit, status_ok := git_run(repository, status_args)
 	if !status_ok {
 		git_destroy_changed_files(&files)
 		commit_detail_destroy(&detail)

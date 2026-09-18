@@ -12,20 +12,6 @@ history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
 	}
 }
 
-history_test_scroll_wakes_in_bounds :: proc(failures: ^int) {
-	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 640, 480})
-	defer alicorn.destroy_runtime(&rt)
-	app := History_App{
-		visible=make([dynamic]int, 100),
-		list_viewport_height=100,
-		row_height=20,
-	}
-	defer delete(app.visible)
-	history_on_scroll(rawptr(&app), &rt, alicorn.Scroll_Event{delta_y=-1, y=200})
-	history_test_expect(failures, app.scroll_y == 20, "in-bounds scrolling advances by one row")
-	history_test_expect(failures, rt.invalidated, "in-bounds scrolling invalidates the application")
-}
-
 history_test_refresh_releases_commit_storage :: proc(failures: ^int) {
 	base_allocator := context.allocator
 	tracking: mem.Tracking_Allocator
@@ -93,6 +79,13 @@ history_test_detail_generation_domains :: proc(failures: ^int) {
 	history_test_expect(failures, app.detail.subject == "selected subject", "current detail payload reaches the selected pane")
 }
 
+history_test_file_stats :: proc(failures: ^int) {
+	binary := Changed_File{additions=-1, deletions=-1}
+	history_test_expect(failures, history_file_stats_text(binary) == "—  —", "binary numstat values render as unavailable counts")
+	text := Changed_File{additions=23, deletions=7}
+	history_test_expect(failures, history_file_stats_text(text) == "+23 -7", "numeric numstat values retain their readable form")
+}
+
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
 	data := make([dynamic]u8, 0, 160)
@@ -113,10 +106,10 @@ history_run_tests :: proc(repository: string) -> bool {
 	current := History_App{latest_history_id=History_Request_ID(7)}
 	history_test_expect(&failures, history_result_is_current(&current, History_Request_ID(7)), "latest history generation is accepted")
 	history_test_expect(&failures, !history_result_is_current(&current, History_Request_ID(6)), "stale history generation is rejected")
-	history_test_scroll_wakes_in_bounds(&failures)
 	history_test_refresh_releases_commit_storage(&failures)
 	history_test_worker_shutdown_stress(&failures, repository)
 	history_test_detail_generation_domains(&failures)
+	history_test_file_stats(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix",
@@ -131,7 +124,8 @@ history_run_tests :: proc(repository: string) -> bool {
 			detail, detail_error := git_load_commit_detail(repository, real_commits[0].id)
 			history_test_expect(&failures, len(detail_error) == 0, "selected commit detail query succeeds")
 			history_test_expect(&failures, detail.id == real_commits[0].id, "commit detail preserves stable Git identity")
-			history_test_expect(&failures, len(detail.files) > 0, "commit detail includes changed-file metadata")
+			// Empty commits are valid Git objects; a successful detail query does
+			// not require at least one changed file.
 			commit_detail_destroy(&detail)
 			if len(detail_error) > 0 { delete(detail_error) }
 		}

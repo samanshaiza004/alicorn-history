@@ -34,7 +34,7 @@ main :: proc() {
 		build=history_build,
 		on_text_change=history_on_text_change,
 		on_key=history_on_key,
-		on_scroll=history_on_scroll,
+		on_scroll=nil,
 		on_tick=nil,
 		on_wake=history_on_wake,
 		on_stop=history_on_stop,
