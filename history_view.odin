@@ -9,6 +9,19 @@ HEADER_BG  :: alicorn.Color{0.08, 0.13, 0.22, 1}
 ROW_BG     :: alicorn.Color{0.10, 0.17, 0.28, 1}
 SELECT_BG  :: alicorn.Color{0.18, 0.35, 0.56, 1}
 
+history_file_status_text :: proc(status: File_Status) -> string {
+	#partial switch status {
+	case .Modified: return "M"
+	case .Added: return "A"
+	case .Deleted: return "D"
+	case .Renamed: return "R"
+	case .Copied: return "C"
+	case .Type_Changed: return "T"
+	case .Unmerged: return "U"
+	}
+	return "?"
+}
+
 history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logical_height: int, dpi_scale: f32) -> alicorn.Node_ID {
 	app := cast(^History_App)state
 	ui, should_build := alicorn.begin_frame(rt)
@@ -69,6 +82,27 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				alicorn.text(&ui, commit.subject, style=alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 				alicorn.text(&ui, fmt.tprintf("%s\n%s <%s>\n%s", commit.id, commit.author_name, commit.author_email, commit_date_text(commit.timestamp)), style=alicorn.Layout_Style{.Column, -1, 72, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 				alicorn.text(&ui, fmt.tprintf("Parents: %d", len(commit.parents)), style=alicorn.Layout_Style{.Row, -1, 28, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+				if app.detail_loading {
+					alicorn.text(&ui, "Loading commit details...", style=alicorn.Layout_Style{.Row, -1, 28, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+				} else if len(app.detail_error) > 0 {
+					alicorn.text(&ui, fmt.tprintf("Detail error: %s", app.detail_error), style=alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+				} else if app.detail.id == app.selected_id {
+					if len(app.detail.body) > 0 {
+						alicorn.text(&ui, app.detail.body, style=alicorn.Layout_Style{.Column, -1, -1, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+					}
+					alicorn.text(&ui, fmt.tprintf("Changed files (%d)", len(app.detail.files)), style=alicorn.Layout_Style{.Row, -1, 28, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+					app.detail_file_viewport_height = f32(logical_height) - 410
+					if app.detail_file_viewport_height < 120 { app.detail_file_viewport_height = 120 }
+					file_metrics := alicorn.virtual_list_metrics(len(app.detail.files), app.detail_files_scroll_y, app.detail_file_viewport_height, app.row_height)
+					app.detail_files_scroll_y = file_metrics.offset_y
+					alicorn.container_begin(&ui, .Virtual_List, label="history-detail-files", style=alicorn.Layout_Style{.Column, -1, app.detail_file_viewport_height, 0, -1, 0, -1, 0, 0, 0, .Stretch, true}, scroll_offset_y=file_metrics.offset_y, layout_scroll_offset_y=file_metrics.leading_offset_y)
+					for position := file_metrics.first; position < file_metrics.last; position += 1 {
+						file := app.detail.files[position]
+						stats := fmt.tprintf("+%d -%d", file.additions, file.deletions)
+						alicorn.text(&ui, fmt.tprintf("%s  %-8s %s", history_file_status_text(file.status), stats, file.path), style=alicorn.Layout_Style{.Row, -1, app.row_height, 0, -1, 0, -1, 0, 2, 0, .Stretch, false})
+					}
+					alicorn.container_end(&ui)
+				}
 				break
 			}
 		}
@@ -81,7 +115,10 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_end(&ui)
 	alicorn.end_frame(&ui)
 	app.filter_node = filter_id
-	if selection_changed { alicorn.invalidate_root(rt, "history selection changed") }
+	if selection_changed {
+		_ = history_worker_submit_detail(app)
+		alicorn.invalidate_root(rt, "history selection changed")
+	}
 	_ = dpi_scale
 	_ = logical_width
 	return root

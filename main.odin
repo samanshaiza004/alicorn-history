@@ -2,13 +2,14 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import alicorn "vendor/alicorn/runtime"
 import host "vendor/alicorn/native/sdl_gpu"
 
 main :: proc() {
 	repository := "."
 	for argument in os.args[1:] {
-		if argument != "--smoke" && argument != "--self-test" { repository = argument; break }
+		if !strings.has_prefix(argument, "--") { repository = argument; break }
 	}
 	if !path_exists(repository) {
 		fmt.println("alicorn-history: repository does not exist:", repository)

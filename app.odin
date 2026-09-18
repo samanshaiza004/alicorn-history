@@ -20,8 +20,15 @@ History_App :: struct {
 	filter_node:         alicorn.Node_ID,
 	loading:             bool,
 	error_text:          string,
-	next_request_id:     Git_Request_ID,
-	latest_request_id:   Git_Request_ID,
+	next_history_id:     History_Request_ID,
+	latest_history_id:   History_Request_ID,
+	next_detail_id:      Detail_Request_ID,
+	latest_detail_id:    Detail_Request_ID,
+	detail:              Commit_Detail,
+	detail_loading:      bool,
+	detail_error:        string,
+	detail_files_scroll_y: f32,
+	detail_file_viewport_height: f32,
 	result_count:        u64,
 	build_count:         u64,
 	worker:              Git_Worker,
@@ -46,12 +53,14 @@ history_app_destroy :: proc(app: ^History_App) {
 	if app == nil { return }
 	git_worker_destroy(&app.worker)
 	history_destroy_commits(app)
+	commit_detail_destroy(&app.detail)
 	delete(app.visible)
 	if len(app.repository) > 0 { delete(app.repository) }
 	if len(app.branch) > 0 { delete(app.branch) }
 	if len(app.filter) > 0 { delete(app.filter) }
 	if len(app.selected_id) > 0 { delete(app.selected_id) }
 	if len(app.error_text) > 0 { delete(app.error_text) }
+	if len(app.detail_error) > 0 { delete(app.detail_error) }
 	app^ = {}
 }
 
@@ -69,9 +78,9 @@ history_destroy_commits :: proc(app: ^History_App) {
 }
 
 history_worker_submit :: proc(app: ^History_App) -> bool {
-	app.next_request_id += 1
+	app.next_history_id += 1
 	request := new(Git_Request)
-	request.id = app.next_request_id
+	request.history_id = app.next_history_id
 	request.kind = .Load_History
 	copy, err := strings.clone(app.repository)
 	if err != nil {
@@ -80,11 +89,10 @@ history_worker_submit :: proc(app: ^History_App) -> bool {
 	}
 	request.repository = copy
 	if !git_worker_request(&app.worker, request) {
-		delete(request.repository)
-		free(request)
+		git_request_destroy(request)
 		return false
 	}
-	app.latest_request_id = request.id
+	app.latest_history_id = request.history_id
 	app.loading = true
 	if len(app.error_text) > 0 {
 		delete(app.error_text)
@@ -93,8 +101,53 @@ history_worker_submit :: proc(app: ^History_App) -> bool {
 	return true
 }
 
-history_result_is_current :: proc(app: ^History_App, result_id: Git_Request_ID) -> bool {
-	return result_id == app.latest_request_id
+history_result_is_current :: proc(app: ^History_App, result_id: History_Request_ID) -> bool {
+	return result_id == app.latest_history_id
+}
+
+detail_result_is_current :: proc(app: ^History_App, result_id: Detail_Request_ID) -> bool {
+	return result_id == app.latest_detail_id
+}
+
+history_reset_detail_storage :: proc(app: ^History_App) {
+	commit_detail_destroy(&app.detail)
+	if len(app.detail_error) > 0 { delete(app.detail_error) }
+	app.detail_error = ""
+	app.detail_loading = false
+	app.detail_files_scroll_y = 0
+}
+
+history_invalidate_detail :: proc(app: ^History_App) {
+	app.next_detail_id += 1
+	app.latest_detail_id = app.next_detail_id
+	history_reset_detail_storage(app)
+}
+
+history_worker_submit_detail :: proc(app: ^History_App) -> bool {
+	if !app.has_selection { return false }
+	selected := -1
+	for commit, index in app.commits {
+		if commit.id == app.selected_id { selected = index; break }
+	}
+	if selected < 0 { history_invalidate_detail(app); return false }
+
+	app.next_detail_id += 1
+	app.latest_detail_id = app.next_detail_id
+	history_reset_detail_storage(app)
+	app.detail_loading = true
+	request := new(Git_Request)
+	request.kind = .Load_Commit_Detail
+	request.detail_id = app.next_detail_id
+	request.repository, _ = strings.clone(app.repository)
+	request.commit_id, _ = strings.clone(app.commits[selected].id)
+	if len(request.repository) == 0 || len(request.commit_id) == 0 ||
+		!git_worker_request(&app.worker, request) {
+		git_request_destroy(request)
+		app.detail_loading = false
+		app.detail_error, _ = strings.clone("Commit detail request could not be queued")
+		return false
+	}
+	return true
 }
 
 history_worker_wake :: proc(data: rawptr) {
@@ -128,7 +181,24 @@ history_on_stop :: proc(state: rawptr) {
 }
 
 history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool {
-	if !history_result_is_current(app, result.id) {
+	if result.kind == .Load_Commit_Detail {
+		if !detail_result_is_current(app, result.detail_id) || !app.has_selection ||
+			(len(result.error_text) == 0 && result.detail.id != app.selected_id) {
+			history_result_destroy(result)
+			free(result)
+			return false
+		}
+		history_reset_detail_storage(app)
+		app.detail = result.detail
+		result.detail = {}
+		app.detail_error = result.error_text
+		result.error_text = ""
+		app.detail_loading = false
+		history_result_destroy(result)
+		free(result)
+		return true
+	}
+	if !history_result_is_current(app, result.history_id) {
 		history_result_destroy(result)
 		free(result)
 		return false
@@ -150,6 +220,7 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 	app.loading = false
 	app.result_count += 1
 	history_rebuild_visible(app)
+	if !app.has_selection { history_invalidate_detail(app) }
 	history_result_destroy(result)
 	free(result)
 	return true
@@ -157,10 +228,20 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 
 history_poll_results :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
 	changed := false
+	history_changed := false
 	for {
 		result, ok := chan.try_recv(app.worker.results)
 		if !ok || result == nil { break }
-		if history_adopt_result(app, result) { changed = true }
+		is_history := result.kind == .Load_History
+		accepted := history_adopt_result(app, result)
+		if accepted { changed = true }
+		if accepted && is_history { history_changed = true }
+	}
+	if history_changed && app.has_selection {
+		// A refresh may replace the selected commit's metadata while keeping
+		// its object ID. Re-request details in its independent generation
+		// domain so the pane cannot silently display an old body/file list.
+		_ = history_worker_submit_detail(app)
 	}
 	if changed { alicorn.invalidate_root(rt, "git history result adopted") }
 }
@@ -260,14 +341,25 @@ history_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alic
 	if len(app.filter) > 0 { delete(app.filter) }
 	app.filter = copy
 	history_rebuild_visible(app)
+	if !app.has_selection { history_invalidate_detail(app) }
 	alicorn.invalidate_root(rt, "history filter changed")
 }
 
 history_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scroll_Event) {
 	app := cast(^History_App)state
-	if event.y < 120 { return }
 	delta := event.delta_y
 	if event.ticks_y != 0 { delta = f32(event.ticks_y) * 3 }
+	if event.x >= 515 && app.has_selection && len(app.detail.files) > 0 {
+		old_scroll := app.detail_files_scroll_y
+		requested := old_scroll - delta * app.row_height
+		metrics := alicorn.virtual_list_metrics(len(app.detail.files), requested, app.detail_file_viewport_height, app.row_height)
+		if metrics.offset_y != old_scroll {
+			app.detail_files_scroll_y = metrics.offset_y
+			alicorn.invalidate_root(rt, "history detail file scroll")
+		}
+		return
+	}
+	if event.y < 120 { return }
 	old_scroll := app.scroll_y
 	requested := old_scroll - delta * app.row_height
 	metrics := alicorn.virtual_list_metrics(len(app.visible), requested, app.list_viewport_height, app.row_height)
@@ -288,6 +380,9 @@ history_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Applicatio
 	case: return false
 	}
 	changed := history_move_selection(app, delta)
-	if changed { alicorn.invalidate_root(rt, "history selection changed") }
+	if changed {
+		_ = history_worker_submit_detail(app)
+		alicorn.invalidate_root(rt, "history selection changed")
+	}
 	return changed
 }

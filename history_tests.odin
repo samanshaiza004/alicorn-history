@@ -31,11 +31,12 @@ history_test_refresh_releases_commit_storage :: proc(failures: ^int) {
 	tracking: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&tracking, base_allocator)
 	context.allocator = mem.tracking_allocator(&tracking)
-	app := History_App{latest_request_id=Git_Request_ID(1)}
+	app := History_App{latest_history_id=History_Request_ID(1)}
 	app.visible = make([dynamic]int, 0, 4)
 	for _ in 0..<100 {
 		result := new(History_Result)
-		result.id = Git_Request_ID(1)
+		result.kind = .Load_History
+		result.history_id = History_Request_ID(1)
 		result.commits = make([dynamic]Commit, 0, 1)
 		id, _ := strings.clone("0123456789abcdef")
 		subject, _ := strings.clone("refresh commit")
@@ -57,7 +58,7 @@ history_test_worker_shutdown_stress :: proc(failures: ^int, repository: string) 
 			continue
 		}
 		request := new(Git_Request)
-		request.id = Git_Request_ID(1)
+		request.history_id = History_Request_ID(1)
 		request.kind = .Load_History
 		request.repository, _ = strings.clone(repository)
 		if !git_worker_request(&worker, request) {
@@ -87,9 +88,9 @@ history_run_tests :: proc(repository: string) -> bool {
 	delete(commits)
 	if len(error_text) > 0 { delete(error_text) }
 
-	current := History_App{latest_request_id=Git_Request_ID(7)}
-	history_test_expect(&failures, history_result_is_current(&current, Git_Request_ID(7)), "latest Git generation is accepted")
-	history_test_expect(&failures, !history_result_is_current(&current, Git_Request_ID(6)), "stale Git generation is rejected")
+	current := History_App{latest_history_id=History_Request_ID(7)}
+	history_test_expect(&failures, history_result_is_current(&current, History_Request_ID(7)), "latest history generation is accepted")
+	history_test_expect(&failures, !history_result_is_current(&current, History_Request_ID(6)), "stale history generation is rejected")
 	history_test_scroll_wakes_in_bounds(&failures)
 	history_test_refresh_releases_commit_storage(&failures)
 	history_test_worker_shutdown_stress(&failures, repository)
@@ -103,6 +104,14 @@ history_run_tests :: proc(repository: string) -> bool {
 		real_commits, real_error := git_parse_log(stdout)
 		history_test_expect(&failures, len(real_error) == 0, "real repository output parses completely")
 		history_test_expect(&failures, len(real_commits) > 0, "real repository produces commits")
+		if len(real_commits) > 0 {
+			detail, detail_error := git_load_commit_detail(repository, real_commits[0].id)
+			history_test_expect(&failures, len(detail_error) == 0, "selected commit detail query succeeds")
+			history_test_expect(&failures, detail.id == real_commits[0].id, "commit detail preserves stable Git identity")
+			history_test_expect(&failures, len(detail.files) > 0, "commit detail includes changed-file metadata")
+			commit_detail_destroy(&detail)
+			if len(detail_error) > 0 { delete(detail_error) }
+		}
 		for i := 0; i < len(real_commits); i += 1 { commit_destroy(&real_commits[i]) }
 		delete(real_commits)
 		if len(real_error) > 0 { delete(real_error) }
