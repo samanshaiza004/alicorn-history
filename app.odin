@@ -122,6 +122,11 @@ history_on_wake :: proc(state: rawptr, rt: ^alicorn.Runtime) {
 	history_poll_results(app, rt)
 }
 
+history_on_stop :: proc(state: rawptr) {
+	app := cast(^History_App)state
+	git_worker_destroy(&app.worker)
+}
+
 history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool {
 	if !history_result_is_current(app, result.id) {
 		history_result_destroy(result)

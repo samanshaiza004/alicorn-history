@@ -36,6 +36,7 @@ main :: proc() {
 		on_scroll=history_on_scroll,
 		on_tick=nil,
 		on_wake=history_on_wake,
+		on_stop=history_on_stop,
 	}
 	host.Run(application, has_argument("--smoke"))
 	fmt.println("alicorn-history PASS", "commits", len(app.commits), "builds", app.build_count, "results", app.result_count)
