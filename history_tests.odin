@@ -71,6 +71,28 @@ history_test_worker_shutdown_stress :: proc(failures: ^int, repository: string) 
 	}
 }
 
+history_test_detail_generation_domains :: proc(failures: ^int) {
+	app := History_App{has_selection=true, latest_detail_id=Detail_Request_ID(2)}
+	app.selected_id, _ = strings.clone("selected")
+	defer {
+		if len(app.selected_id) > 0 { delete(app.selected_id) }
+		commit_detail_destroy(&app.detail)
+	}
+	stale := new(History_Result)
+	stale.kind = .Load_Commit_Detail
+	stale.detail_id = Detail_Request_ID(1)
+	stale.detail.id, _ = strings.clone("selected")
+	history_test_expect(failures, !history_adopt_result(&app, stale), "stale detail generation is rejected")
+
+	current := new(History_Result)
+	current.kind = .Load_Commit_Detail
+	current.detail_id = Detail_Request_ID(2)
+	current.detail.id, _ = strings.clone("selected")
+	current.detail.subject, _ = strings.clone("selected subject")
+	history_test_expect(failures, history_adopt_result(&app, current), "current detail generation is adopted")
+	history_test_expect(failures, app.detail.subject == "selected subject", "current detail payload reaches the selected pane")
+}
+
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
 	data := make([dynamic]u8, 0, 160)
@@ -94,6 +116,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_scroll_wakes_in_bounds(&failures)
 	history_test_refresh_releases_commit_storage(&failures)
 	history_test_worker_shutdown_stress(&failures, repository)
+	history_test_detail_generation_domains(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix",
