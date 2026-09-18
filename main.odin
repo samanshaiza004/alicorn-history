@@ -23,17 +23,19 @@ main :: proc() {
 		history_app_destroy(app)
 		free(app)
 	}
-	if app == nil || !history_worker_submit(app) { os.exit(1) }
+	if app == nil { os.exit(1) }
 	application := host.Application{
 		state=rawptr(app),
 		title="Alicorn History",
 		width=1200,
 		height=800,
+		on_start=history_on_start,
 		build=history_build,
 		on_text_change=history_on_text_change,
 		on_key=history_on_key,
 		on_scroll=history_on_scroll,
-		on_tick=history_on_tick,
+		on_tick=nil,
+		on_wake=history_on_wake,
 	}
 	host.Run(application, has_argument("--smoke"))
 	fmt.println("alicorn-history PASS", "commits", len(app.commits), "builds", app.build_count, "results", app.result_count)

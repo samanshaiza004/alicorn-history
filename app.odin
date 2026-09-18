@@ -25,6 +25,7 @@ History_App :: struct {
 	result_count:        u64,
 	build_count:         u64,
 	worker:              Git_Worker,
+	waker:               host.Application_Waker,
 }
 
 history_app_new :: proc(repository: string) -> ^History_App {
@@ -38,19 +39,13 @@ history_app_new :: proc(repository: string) -> ^History_App {
 	app.row_height = 44
 	app.list_viewport_height = 560
 	app.visible = make([dynamic]int, 0, 1024)
-	if !git_worker_start(&app.worker) {
-		delete(app.repository)
-		delete(app.visible)
-		free(app)
-		return nil
-	}
 	return app
 }
 
 history_app_destroy :: proc(app: ^History_App) {
 	if app == nil { return }
 	git_worker_destroy(&app.worker)
-	history_clear_commits(app)
+	history_destroy_commits(app)
 	delete(app.visible)
 	if len(app.repository) > 0 { delete(app.repository) }
 	if len(app.branch) > 0 { delete(app.branch) }
@@ -65,6 +60,12 @@ history_clear_commits :: proc(app: ^History_App) {
 		commit_destroy(&app.commits[i])
 	}
 	clear(&app.commits)
+}
+
+history_destroy_commits :: proc(app: ^History_App) {
+	history_clear_commits(app)
+	delete(app.commits)
+	app.commits = {}
 }
 
 history_worker_submit :: proc(app: ^History_App) -> bool {
@@ -96,13 +97,38 @@ history_result_is_current :: proc(app: ^History_App, result_id: Git_Request_ID) 
 	return result_id == app.latest_request_id
 }
 
+history_worker_wake :: proc(data: rawptr) {
+	app := cast(^History_App)data
+	host.application_wake(app.waker)
+}
+
+history_on_start :: proc(state: rawptr, waker: host.Application_Waker) {
+	app := cast(^History_App)state
+	app.waker = waker
+	git_worker_set_waker(&app.worker, Git_Waker{data=rawptr(app), wake=history_worker_wake})
+	if !git_worker_start(&app.worker) {
+		app.error_text, _ = strings.clone("Git worker could not start")
+		app.loading = false
+		return
+	}
+	if !history_worker_submit(app) {
+		app.error_text, _ = strings.clone("Git history request could not be queued")
+		app.loading = false
+	}
+}
+
+history_on_wake :: proc(state: rawptr, rt: ^alicorn.Runtime) {
+	app := cast(^History_App)state
+	history_poll_results(app, rt)
+}
+
 history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool {
 	if !history_result_is_current(app, result.id) {
 		history_result_destroy(result)
 		free(result)
 		return false
 	}
-	history_clear_commits(app)
+	history_destroy_commits(app)
 	if len(app.branch) > 0 { delete(app.branch) }
 	if len(app.error_text) > 0 { delete(app.error_text) }
 	app.commits = result.commits
@@ -237,9 +263,10 @@ history_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Sc
 	if event.y < 120 { return }
 	delta := event.delta_y
 	if event.ticks_y != 0 { delta = f32(event.ticks_y) * 3 }
-	app.scroll_y -= delta * app.row_height
-	metrics := alicorn.virtual_list_metrics(len(app.visible), app.scroll_y, app.list_viewport_height, app.row_height)
-	if metrics.offset_y != app.scroll_y {
+	old_scroll := app.scroll_y
+	requested := old_scroll - delta * app.row_height
+	metrics := alicorn.virtual_list_metrics(len(app.visible), requested, app.list_viewport_height, app.row_height)
+	if metrics.offset_y != old_scroll {
 		app.scroll_y = metrics.offset_y
 		alicorn.invalidate_root(rt, "history scroll")
 	}
@@ -258,9 +285,4 @@ history_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Applicatio
 	changed := history_move_selection(app, delta)
 	if changed { alicorn.invalidate_root(rt, "history selection changed") }
 	return changed
-}
-
-history_on_tick :: proc(state: rawptr, rt: ^alicorn.Runtime) {
-	app := cast(^History_App)state
-	history_poll_results(app, rt)
 }

@@ -27,7 +27,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	alicorn.text(&ui, fmt.tprintf("%s\n%s", app.repository, status), style=alicorn.Layout_Style{.Row, -1, 40, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 
-	filter_style := alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 1, 0, 8, .Stretch, false}
+	filter_style := alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 0, 0, 8, .Stretch, false}
 	filter_id := alicorn.text_field(&ui, app.filter, key=alicorn.key_string("history-filter"), style=filter_style)
 	refresh_clicked := alicorn.button(&ui, "Refresh", key=alicorn.key_string("history-refresh"), style=alicorn.Layout_Style{.Row, 100, 30, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 	if refresh_clicked {

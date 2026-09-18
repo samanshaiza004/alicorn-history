@@ -1,11 +1,72 @@
 package main
 
 import "core:fmt"
+import "core:mem"
+import "core:strings"
+import alicorn "vendor/alicorn/runtime"
 
 history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
 	if !condition {
 		failures^ += 1
 		fmt.println("FAIL:", message)
+	}
+}
+
+history_test_scroll_wakes_in_bounds :: proc(failures: ^int) {
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 640, 480})
+	defer alicorn.destroy_runtime(&rt)
+	app := History_App{
+		visible=make([dynamic]int, 100),
+		list_viewport_height=100,
+		row_height=20,
+	}
+	defer delete(app.visible)
+	history_on_scroll(rawptr(&app), &rt, alicorn.Scroll_Event{delta_y=-1, y=200})
+	history_test_expect(failures, app.scroll_y == 20, "in-bounds scrolling advances by one row")
+	history_test_expect(failures, rt.invalidated, "in-bounds scrolling invalidates the application")
+}
+
+history_test_refresh_releases_commit_storage :: proc(failures: ^int) {
+	base_allocator := context.allocator
+	tracking: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracking, base_allocator)
+	context.allocator = mem.tracking_allocator(&tracking)
+	app := History_App{latest_request_id=Git_Request_ID(1)}
+	app.visible = make([dynamic]int, 0, 4)
+	for _ in 0..<100 {
+		result := new(History_Result)
+		result.id = Git_Request_ID(1)
+		result.commits = make([dynamic]Commit, 0, 1)
+		id, _ := strings.clone("0123456789abcdef")
+		subject, _ := strings.clone("refresh commit")
+		append(&result.commits, Commit{id=id, subject=subject})
+		history_test_expect(failures, history_adopt_result(&app, result), "current refresh result is adopted")
+	}
+	history_destroy_commits(&app)
+	delete(app.visible)
+	context.allocator = base_allocator
+	history_test_expect(failures, len(tracking.allocation_map) == 0, "repeated refreshes release replaced commit backing storage")
+	mem.tracking_allocator_destroy(&tracking)
+}
+
+history_test_worker_shutdown_stress :: proc(failures: ^int, repository: string) {
+	for _ in 0..<5 {
+		worker: Git_Worker
+		if !git_worker_start(&worker) {
+			history_test_expect(failures, false, "Git worker starts for shutdown stress")
+			continue
+		}
+		request := new(Git_Request)
+		request.id = Git_Request_ID(1)
+		request.kind = .Load_History
+		request.repository, _ = strings.clone(repository)
+		if !git_worker_request(&worker, request) {
+			delete(request.repository)
+			free(request)
+		}
+		// Destroy immediately. Result delivery is nonblocking, so a worker
+		// cannot wedge shutdown behind a full result mailbox.
+		git_worker_destroy(&worker)
 	}
 }
 
@@ -29,6 +90,9 @@ history_run_tests :: proc(repository: string) -> bool {
 	current := History_App{latest_request_id=Git_Request_ID(7)}
 	history_test_expect(&failures, history_result_is_current(&current, Git_Request_ID(7)), "latest Git generation is accepted")
 	history_test_expect(&failures, !history_result_is_current(&current, Git_Request_ID(6)), "stale Git generation is rejected")
+	history_test_scroll_wakes_in_bounds(&failures)
+	history_test_refresh_releases_commit_storage(&failures)
+	history_test_worker_shutdown_stress(&failures, repository)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix",

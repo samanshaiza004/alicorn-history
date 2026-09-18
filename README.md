@@ -7,6 +7,12 @@ Phase 1 focuses on one architectural question: can a native Alicorn application
 load a large, mostly-static data set asynchronously and then remain quiet when
 nothing is happening?
 
+History uses Alicorn's event-driven native host path: the Git worker publishes
+owned results through an Odin channel and requests an opaque host wakeup. The
+worker never knows about SDL, and the UI has no periodic tick callback. After
+the initial result is rendered, the host can sleep until a window/input event
+or a worker completion arrives.
+
 The application uses the installed `git` executable for repository data. It
 does not checkout, modify, stage, commit, merge, rebase, push, or contact a
 remote. Git work runs on an app-owned worker; the worker never touches the
@@ -36,6 +42,8 @@ alicorn-history C:\path\to\repository
 - mouse and keyboard selection;
 - explicit refresh;
 - no blocking Git command on the UI thread;
+- no periodic application tick while idle;
+- bounded, nonblocking result delivery during shutdown;
 - no write operations or network access.
 
 Commit details, diffs, refs, and the DAG are intentionally later phases.
