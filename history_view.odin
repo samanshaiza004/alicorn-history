@@ -83,6 +83,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	ui, should_build := alicorn.begin_frame(rt)
 	if !should_build { return 0 }
 	app.build_count += 1
+	first_build := app.filter_node == 0
 	selection_changed := false
 	file_selection_changed := false
 
@@ -138,6 +139,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	alicorn.container_end(&ui)
 	alicorn.scroll_region_end(&ui)
+	alicorn.container_end(&ui)
 
 	alicorn.container_begin(&ui, .Container, label="history-detail-panel", style=alicorn.Layout_Style{.Column, -1, -1, 0, -1, 0, -1, 1, 8, 6, .Stretch, true}, color=PANEL_BG)
 	if app.has_selection && app.selected_commit_index >= 0 && app.selected_commit_index < len(app.commits) {
@@ -244,6 +246,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_end(&ui)
 	alicorn.end_frame(&ui)
 	app.filter_node = filter_id
+	if first_build && filter_id != 0 {
+		// Start the application in a deterministic keyboard-ready state. The
+		// native host can then use Tab/Shift-Tab and Enter/Space without
+		// requiring a preliminary mouse click.
+		_ = alicorn.focus(rt, filter_id)
+	}
 	if selection_changed {
 		_ = history_worker_submit_detail(app)
 		_ = alicorn.scroll_region_set_offset(rt, app.history_scroll_node, app.scroll_y, "history selection visibility")

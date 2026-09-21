@@ -177,6 +177,64 @@ history_test_large_patch :: proc(failures: ^int) {
 	if len(error_text) > 0 { delete(error_text) }
 }
 
+history_test_view_layout_and_focus :: proc(failures: ^int) {
+	app := history_app_new(".")
+	if app == nil {
+		history_test_expect(failures, false, "history view fixture allocates its application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.loading = false
+	app.branch, _ = strings.clone("main")
+	app.commits = make([dynamic]Commit, 0, 48)
+	for i := 0; i < 48; i += 1 {
+		id := fmt.tprintf("%040x", i+1)
+		subject := fmt.tprintf("history fixture commit %d", i+1)
+		commit := Commit{}
+		commit.id, _ = strings.clone(id)
+		commit.subject, _ = strings.clone(subject)
+		append(&app.commits, commit)
+	}
+	history_rebuild_visible(app)
+
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
+	defer alicorn.destroy_runtime(&rt)
+	_ = history_build(rawptr(app), &rt, 1200, 800, 2)
+	if rt.invalidated { _ = history_build(rawptr(app), &rt, 1200, 800, 2) }
+
+	history_test_expect(failures, app.filter_node != 0, "history view retains its filter node")
+	history_test_expect(failures, rt.focused == app.filter_node, "history view starts with the filter focused")
+	if filter, ok := rt.nodes[app.filter_node]; ok {
+		history_test_expect(failures, filter.bounds.y >= 0 && filter.bounds.y+filter.bounds.h <= rt.viewport.h, "filter bounds remain inside the window")
+	}
+	if list, ok := rt.nodes[app.history_scroll_node]; ok {
+		history_test_expect(failures, list.bounds.y >= 0 && list.bounds.y+list.bounds.h <= rt.viewport.h, "history list viewport remains inside the window")
+		history_test_expect(failures, list.scroll_content_height > list.scroll_viewport_height, "history list exposes scrollable content")
+		history_test_expect(failures, list.scroll_offset_y >= 0 && list.scroll_offset_y <= list.scroll_content_height-list.scroll_viewport_height, "history scroll offset is clamped to its viewport")
+	} else {
+		history_test_expect(failures, false, "history scroll region is retained")
+	}
+	detail_panel: ^alicorn.Node = nil
+	for _, node in rt.nodes {
+		if node.label == "history-detail-panel" { detail_panel = node; break }
+	}
+	if detail_panel != nil {
+		history_test_expect(failures, detail_panel.parent != 0, "history detail panel is retained under the main row")
+		history_test_expect(failures, detail_panel.bounds.x > 500, "history detail panel is a sibling beside the commit list")
+		history_test_expect(failures, detail_panel.bounds.y >= 0 && detail_panel.bounds.y+detail_panel.bounds.h <= rt.viewport.h, "history detail panel remains inside the window")
+	} else {
+		history_test_expect(failures, false, "history detail panel is retained")
+	}
+	if next := alicorn.focus_traverse(&rt, .Next); next != 0 {
+		history_test_expect(failures, next != app.filter_node, "focus traversal advances past the filter")
+	} else {
+		history_test_expect(failures, false, "history view exposes a next focus target")
+	}
+}
+
 history_test_clean_object_id :: proc(value: string) -> bool {
 	for byte in value {
 		if byte == '\n' || byte == '\r' || byte == 0 { return false }
@@ -211,6 +269,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_patch_parser(&failures)
 	history_test_patch_generation(&failures)
 	history_test_large_patch(&failures)
+	history_test_view_layout_and_focus(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix", "-z",
