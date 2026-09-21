@@ -34,6 +34,18 @@ bounded native run. The UI accepts a repository path as its first argument too:
 alicorn-history C:\path\to\repository
 ```
 
+On macOS or another Unix-like host, use the native shell wrapper. It resolves
+Odin from `ALICORN_ODIN` or `PATH`, initializes the pinned Alicorn submodule,
+builds under `out/`, and forwards the repository and host flags:
+
+```sh
+ALICORN_ODIN=/path/to/odin ./tools/run.sh /path/to/repository
+./tools/run.sh /path/to/repository --smoke --select-first
+./tools/check.sh /path/to/repository
+```
+
+The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
+
 ## Phase 1–3 scope
 
 - repository path and current branch summary;
