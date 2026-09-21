@@ -156,7 +156,7 @@ git_load_commit_detail :: proc(repository, commit_id: string) -> (detail: Commit
 	stdout, stderr, exit_code, ok := git_run(repository, []string{
 		"show", "--no-patch", "--no-color", "--no-ext-diff",
 		"--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00%x00",
-		commit_id,
+		commit_id, "--",
 	})
 	if !ok {
 		error_text = git_error_text(stderr, exit_code)
@@ -175,9 +175,9 @@ git_load_commit_detail :: proc(repository, commit_id: string) -> (detail: Commit
 	diff_prefix := []string{"diff-tree", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames"}
 	diff_args := []string{}
 	if len(detail.parents) == 0 {
-		diff_args = []string{"diff-tree", "--root", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames", commit_id}
+		diff_args = []string{"diff-tree", "--root", "--no-commit-id", "--numstat", "-r", "-z", "--no-renames", commit_id, "--"}
 	} else {
-		diff_args = []string{diff_prefix[0], diff_prefix[1], diff_prefix[2], diff_prefix[3], diff_prefix[4], diff_prefix[5], detail.parents[0], commit_id}
+		diff_args = []string{diff_prefix[0], diff_prefix[1], diff_prefix[2], diff_prefix[3], diff_prefix[4], diff_prefix[5], detail.parents[0], commit_id, "--"}
 	}
 	numstat, numstat_stderr, numstat_exit, numstat_ok := git_run(repository, diff_args)
 	if !numstat_ok {
@@ -198,9 +198,9 @@ git_load_commit_detail :: proc(repository, commit_id: string) -> (detail: Commit
 
 	status_args := []string{}
 	if len(detail.parents) == 0 {
-		status_args = []string{"diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", commit_id}
+		status_args = []string{"diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", commit_id, "--"}
 	} else {
-		status_args = []string{"diff-tree", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", detail.parents[0], commit_id}
+		status_args = []string{"diff-tree", "--no-commit-id", "--name-status", "-r", "-z", "--no-renames", detail.parents[0], commit_id, "--"}
 	}
 	status_data, status_stderr, status_exit, status_ok := git_run(repository, status_args)
 	if !status_ok {

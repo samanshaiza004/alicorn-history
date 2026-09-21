@@ -34,16 +34,25 @@ bounded native run. The UI accepts a repository path as its first argument too:
 alicorn-history C:\path\to\repository
 ```
 
-## Phase 1 scope
+## Phase 1 and Phase 2 scope
 
 - repository path and current branch summary;
 - asynchronous `git log` loading;
 - filterable, keyed, fixed-height virtual commit list;
 - mouse and keyboard selection;
+- asynchronous commit details and changed-file summaries;
+- independent latest-wins history and detail request lanes;
+- first-parent semantics for merge commit details;
+- retained scroll-region routing for the history and detail panes;
 - explicit refresh;
 - no blocking Git command on the UI thread;
 - no periodic application tick while idle;
+- a blocking worker signal rather than an idle polling loop;
 - bounded, nonblocking result delivery during shutdown;
 - no write operations or network access.
 
-Commit details, diffs, refs, and the DAG are intentionally later phases.
+The machine-readable Git log uses NUL-separated records (`git log -z`), and
+the parser defensively ignores record-separator newlines so every parsed object
+ID can be used directly in a subsequent Git query. Commit details, diffs, refs,
+and the DAG remain intentionally separate phases; the next phase is the
+diff viewer.

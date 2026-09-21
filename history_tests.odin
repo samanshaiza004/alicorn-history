@@ -86,6 +86,13 @@ history_test_file_stats :: proc(failures: ^int) {
 	history_test_expect(failures, history_file_stats_text(text) == "+23 -7", "numeric numstat values retain their readable form")
 }
 
+history_test_clean_object_id :: proc(value: string) -> bool {
+	for byte in value {
+		if byte == '\n' || byte == '\r' || byte == 0 { return false }
+	}
+	return len(value) > 0
+}
+
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
 	data := make([dynamic]u8, 0, 160)
@@ -112,7 +119,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_file_stats(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
-		"log", "--all", "--topo-order", "--date=unix",
+		"log", "--all", "--topo-order", "--date=unix", "-z",
 		"--pretty=format:%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x00",
 	})
 	history_test_expect(&failures, command_ok, "installed Git can read the target repository")
@@ -120,10 +127,12 @@ history_run_tests :: proc(repository: string) -> bool {
 		real_commits, real_error := git_parse_log(stdout)
 		history_test_expect(&failures, len(real_error) == 0, "real repository output parses completely")
 		history_test_expect(&failures, len(real_commits) > 0, "real repository produces commits")
-		if len(real_commits) > 0 {
-			detail, detail_error := git_load_commit_detail(repository, real_commits[0].id)
-			history_test_expect(&failures, len(detail_error) == 0, "selected commit detail query succeeds")
-			history_test_expect(&failures, detail.id == real_commits[0].id, "commit detail preserves stable Git identity")
+		limit := min(len(real_commits), 3)
+		for i := 0; i < limit; i += 1 {
+			history_test_expect(&failures, history_test_clean_object_id(real_commits[i].id), fmt.tprintf("parsed commit %d has no record-separator bytes", i))
+			detail, detail_error := git_load_commit_detail(repository, real_commits[i].id)
+			history_test_expect(&failures, len(detail_error) == 0, fmt.tprintf("commit detail query succeeds for parsed commit %d", i))
+			history_test_expect(&failures, detail.id == real_commits[i].id, fmt.tprintf("commit detail preserves stable identity for parsed commit %d", i))
 			// Empty commits are valid Git objects; a successful detail query does
 			// not require at least one changed file.
 			commit_detail_destroy(&detail)

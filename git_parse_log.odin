@@ -23,7 +23,7 @@ git_parse_log :: proc(data: []byte) -> (commits: [dynamic]Commit, error_text: st
 	commits = make([dynamic]Commit, 0, 256)
 	position := 0
 	for position < len(data) {
-		if data[position] == 0 {
+		if data[position] == 0 || data[position] == '\n' || data[position] == '\r' {
 			position += 1
 			continue
 		}

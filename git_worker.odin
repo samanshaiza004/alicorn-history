@@ -14,7 +14,7 @@ Git_Waker :: struct {
 // those lanes so a burst of detail requests cannot evict the only current
 // history snapshot (or vice versa).
 Git_Worker :: struct {
-	stop:             chan.Chan(^Git_Request),
+	work_signal:      chan.Chan(u8),
 	history_requests: chan.Chan(^Git_Request),
 	detail_requests:  chan.Chan(^Git_Request),
 	history_results:  chan.Chan(^History_Result),
@@ -42,62 +42,58 @@ git_worker_deliver :: proc(worker: ^Git_Worker, result: ^History_Result) -> bool
 
 git_worker_proc :: proc(data: rawptr) {
 	worker := cast(^Git_Worker)data
-	receive_channels := [?]^chan.Raw_Chan{
-		worker.stop.impl,
-		worker.history_requests.impl,
-		worker.detail_requests.impl,
-	}
 	for {
-		received: rawptr
-		selected, status := chan.try_select_raw(receive_channels[:], nil, nil, &received)
-		for status == .None {
-			thread.yield()
-			selected, status = chan.try_select_raw(receive_channels[:], nil, nil, &received)
-		}
-		if status != .Recv || selected < 0 || selected == 0 { break }
-		request := cast(^Git_Request)received
-		if request == nil { continue }
-		result := new(History_Result)
-		result.kind = request.kind
-		result.history_id = request.history_id
-		result.detail_id = request.detail_id
-		result.repository = request.repository
-		commit_id := request.commit_id
-		kind := request.kind
-		request.repository = ""
-		request.commit_id = ""
-		git_request_destroy(request)
-		if kind == .Load_History {
-			stdout, stderr, exit_code, command_ok := git_run(result.repository, []string{
-				"log", "--all", "--topo-order", "--date=unix",
-				"--pretty=format:%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x00",
-			})
-			if !command_ok {
-				result.error_text = git_error_text(stderr, exit_code)
-				if len(stdout) > 0 { delete(stdout) }
-				if len(stderr) > 0 { delete(stderr) }
-			} else {
-				result.commits, result.error_text = git_parse_log(stdout)
-				if len(stdout) > 0 { delete(stdout) }
-				if len(stderr) > 0 { delete(stderr) }
+		signal, ok := chan.recv(worker.work_signal)
+		if !ok || signal == 0 { break }
+		for {
+			// A single coalesced signal can represent work in both lanes. Drain
+			// all pending lanes before blocking again so a detail request cannot
+			// strand behind a history request (or vice versa).
+			request, history_ready := chan.try_recv(worker.history_requests)
+			if !history_ready { request, history_ready = chan.try_recv(worker.detail_requests) }
+			if !history_ready { break }
+			result := new(History_Result)
+			result.kind = request.kind
+			result.history_id = request.history_id
+			result.detail_id = request.detail_id
+			result.repository = request.repository
+			commit_id := request.commit_id
+			kind := request.kind
+			request.repository = ""
+			request.commit_id = ""
+			git_request_destroy(request)
+			if kind == .Load_History {
+				stdout, stderr, exit_code, command_ok := git_run(result.repository, []string{
+					"log", "--all", "--topo-order", "--date=unix", "-z",
+					"--pretty=format:%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%x00",
+				})
+				if !command_ok {
+					result.error_text = git_error_text(stderr, exit_code)
+					if len(stdout) > 0 { delete(stdout) }
+					if len(stderr) > 0 { delete(stderr) }
+				} else {
+					result.commits, result.error_text = git_parse_log(stdout)
+					if len(stdout) > 0 { delete(stdout) }
+					if len(stderr) > 0 { delete(stderr) }
+				}
+				result.branch = git_repository_branch(result.repository)
+			} else if kind == .Load_Commit_Detail {
+				result.detail, result.error_text = git_load_commit_detail(result.repository, commit_id)
 			}
-			result.branch = git_repository_branch(result.repository)
-		} else if kind == .Load_Commit_Detail {
-			result.detail, result.error_text = git_load_commit_detail(result.repository, commit_id)
-		}
-		if len(commit_id) > 0 { delete(commit_id) }
-		if !git_worker_deliver(worker, result) {
-			git_worker_destroy_result(result)
-			continue
-		}
-		if worker.waker.wake != nil {
-			worker.waker.wake(worker.waker.data)
+			if len(commit_id) > 0 { delete(commit_id) }
+			if !git_worker_deliver(worker, result) {
+				git_worker_destroy_result(result)
+				continue
+			}
+			if worker.waker.wake != nil {
+				worker.waker.wake(worker.waker.data)
+			}
 		}
 	}
 }
 
 git_worker_start :: proc(worker: ^Git_Worker) -> bool {
-	worker.stop, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
+	worker.work_signal, _ = chan.create_buffered(chan.Chan(u8), 1, context.allocator)
 	worker.history_requests, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
 	worker.detail_requests, _ = chan.create_buffered(chan.Chan(^Git_Request), 1, context.allocator)
 	worker.history_results, _ = chan.create_buffered(chan.Chan(^History_Result), 1, context.allocator)
@@ -124,9 +120,13 @@ git_worker_request :: proc(worker: ^Git_Worker, request: ^Git_Request) -> bool {
 	if worker == nil || !worker.started || request == nil { return false }
 	switch request.kind {
 	case .Load_History:
-		return git_worker_replace_request(worker.history_requests, request)
+		queued := git_worker_replace_request(worker.history_requests, request)
+		if queued { _ = chan.try_send(worker.work_signal, 1) }
+		return queued
 	case .Load_Commit_Detail:
-		return git_worker_replace_request(worker.detail_requests, request)
+		queued := git_worker_replace_request(worker.detail_requests, request)
+		if queued { _ = chan.try_send(worker.work_signal, 1) }
+		return queued
 	}
 	return false
 }
@@ -155,13 +155,17 @@ git_worker_destroy :: proc(worker: ^Git_Worker) {
 		// request can delay shutdown after that process returns.
 		git_worker_drain_requests(worker.history_requests)
 		git_worker_drain_requests(worker.detail_requests)
-		_ = chan.try_send(worker.stop, nil)
+		// Replace any coalesced work token with a stop token. The worker is
+		// either blocked in recv or finishing the one Git command already in
+		// flight; no queued request remains after the drains above.
+		_, _ = chan.try_recv(worker.work_signal)
+		_ = chan.try_send(worker.work_signal, 0)
 		thread.join(worker.thread)
 		thread.destroy(worker.thread)
 	}
 	git_worker_drain_results(worker.history_results)
 	git_worker_drain_results(worker.detail_results)
-	_ = chan.destroy(worker.stop.impl)
+	_ = chan.destroy(worker.work_signal.impl)
 	_ = chan.destroy(worker.history_requests.impl)
 	_ = chan.destroy(worker.detail_requests.impl)
 	_ = chan.destroy(worker.history_results.impl)
