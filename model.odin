@@ -5,24 +5,29 @@ import "core:strings"
 
 History_Request_ID :: distinct u64
 Detail_Request_ID  :: distinct u64
+Patch_Request_ID   :: distinct u64
 
 Git_Request_Kind :: enum {
 	Load_History,
 	Load_Commit_Detail,
+	Load_File_Patch,
 }
 
 Git_Request :: struct {
 	history_id: History_Request_ID,
 	detail_id:  Detail_Request_ID,
+	patch_id:   Patch_Request_ID,
 	kind:       Git_Request_Kind,
 	repository: string,
 	commit_id:  string,
+	file_path:  string,
 }
 
 git_request_destroy :: proc(request: ^Git_Request) {
 	if request == nil { return }
 	if len(request.repository) > 0 { delete(request.repository) }
 	if len(request.commit_id) > 0 { delete(request.commit_id) }
+	if len(request.file_path) > 0 { delete(request.file_path) }
 	free(request)
 }
 
@@ -42,6 +47,44 @@ Changed_File :: struct {
 	status:    File_Status,
 	additions: int,
 	deletions: int,
+}
+
+Diff_Line_Kind :: enum {
+	Context,
+	Addition,
+	Deletion,
+	Meta,
+}
+
+Diff_Line :: struct {
+	kind:     Diff_Line_Kind,
+	old_line: int,
+	new_line: int,
+	text:     string,
+}
+
+Diff_Hunk :: struct {
+	old_start: int,
+	old_count: int,
+	new_start: int,
+	new_count: int,
+	header:    string,
+	lines:     [dynamic]Diff_Line,
+}
+
+File_Patch :: struct {
+	path:     string,
+	binary:   bool,
+	metadata: [dynamic]string,
+	hunks:    [dynamic]Diff_Hunk,
+}
+
+Patch_Display_Line :: struct {
+	kind:     Diff_Line_Kind,
+	old_line: int,
+	new_line: int,
+	text:     string,
+	hunk:     bool,
 }
 
 Commit_Detail :: struct {
@@ -68,11 +111,34 @@ History_Result :: struct {
 	kind:       Git_Request_Kind,
 	history_id: History_Request_ID,
 	detail_id:  Detail_Request_ID,
+	patch_id:   Patch_Request_ID,
 	repository: string,
 	branch:     string,
 	commits:    [dynamic]Commit,
 	detail:     Commit_Detail,
+	patch:      File_Patch,
 	error_text: string,
+}
+
+diff_line_destroy :: proc(line: ^Diff_Line) {
+	if len(line.text) > 0 { delete(line.text) }
+	line^ = {}
+}
+
+diff_hunk_destroy :: proc(hunk: ^Diff_Hunk) {
+	if len(hunk.header) > 0 { delete(hunk.header) }
+	for &line in hunk.lines { diff_line_destroy(&line) }
+	delete(hunk.lines)
+	hunk^ = {}
+}
+
+file_patch_destroy :: proc(patch: ^File_Patch) {
+	if len(patch.path) > 0 { delete(patch.path) }
+	for metadata in patch.metadata { if len(metadata) > 0 { delete(metadata) } }
+	delete(patch.metadata)
+	for &hunk in patch.hunks { diff_hunk_destroy(&hunk) }
+	delete(patch.hunks)
+	patch^ = {}
 }
 
 commit_detail_destroy :: proc(detail: ^Commit_Detail) {
@@ -108,6 +174,7 @@ history_result_destroy :: proc(result: ^History_Result) {
 	}
 	delete(result.commits)
 	commit_detail_destroy(&result.detail)
+	file_patch_destroy(&result.patch)
 	result^ = {}
 }
 

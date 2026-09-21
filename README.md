@@ -34,14 +34,20 @@ bounded native run. The UI accepts a repository path as its first argument too:
 alicorn-history C:\path\to\repository
 ```
 
-## Phase 1 and Phase 2 scope
+## Phase 1–3 scope
 
 - repository path and current branch summary;
 - asynchronous `git log` loading;
 - filterable, keyed, fixed-height virtual commit list;
 - mouse and keyboard selection;
 - asynchronous commit details and changed-file summaries;
+- selectable changed files with asynchronous latest-wins patch loading;
+- deterministic first-parent unified patches from Git;
+- structured hunk/line parsing with binary and mode-change fallbacks;
+- virtualized, no-wrap diff rows with fixed line-number gutters and retained
+  horizontal scrolling;
 - independent latest-wins history and detail request lanes;
+- an independent latest-wins patch request lane;
 - first-parent semantics for merge commit details;
 - retained scroll-region routing for the history and detail panes;
 - explicit refresh;
@@ -53,6 +59,12 @@ alicorn-history C:\path\to\repository
 
 The machine-readable Git log uses NUL-separated records (`git log -z`), and
 the parser defensively ignores record-separator newlines so every parsed object
-ID can be used directly in a subsequent Git query. Commit details, diffs, refs,
-and the DAG remain intentionally separate phases; the next phase is the
-diff viewer.
+ID can be used directly in a subsequent Git query. Patch commands disable user
+diff helpers and interpret Git-provided paths literally. Merge changes are
+shown relative to the first parent; root commits compare against the empty
+tree. Refs and the DAG remain intentionally separate phases.
+
+The diff viewer is deliberately not a code editor: it has no syntax
+highlighting, editing, staging, checkout, or write operations. It is a
+structured, virtualized unified-patch view intended to pressure large text,
+horizontal scrolling, independent async selection, and true idle behavior.

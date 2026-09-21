@@ -27,11 +27,24 @@ History_App :: struct {
 	latest_history_id:   History_Request_ID,
 	next_detail_id:      Detail_Request_ID,
 	latest_detail_id:    Detail_Request_ID,
+	next_patch_id:       Patch_Request_ID,
+	latest_patch_id:     Patch_Request_ID,
 	detail:              Commit_Detail,
 	detail_loading:      bool,
 	detail_error:        string,
+	selected_file_index: int,
+	selected_file_path:  string,
+	patch:               File_Patch,
+	patch_loading:       bool,
+	patch_error:         string,
 	detail_files_scroll_y: f32,
 	detail_file_viewport_height: f32,
+	patch_scroll_y:      f32,
+	patch_scroll_x:      f32,
+	patch_viewport_height: f32,
+	patch_viewport_width:  f32,
+	patch_scroll_node:   alicorn.Node_ID,
+	select_first_on_load: bool,
 	result_count:        u64,
 	build_count:         u64,
 	worker:              Git_Worker,
@@ -48,6 +61,7 @@ history_app_new :: proc(repository: string) -> ^History_App {
 	app.repository = copy
 	app.row_height = 44
 	app.selected_commit_index = -1
+	app.selected_file_index = -1
 	app.list_viewport_height = 560
 	app.visible = make([dynamic]int, 0, 1024)
 	return app
@@ -58,6 +72,7 @@ history_app_destroy :: proc(app: ^History_App) {
 	git_worker_destroy(&app.worker)
 	history_destroy_commits(app)
 	commit_detail_destroy(&app.detail)
+	file_patch_destroy(&app.patch)
 	delete(app.visible)
 	if len(app.repository) > 0 { delete(app.repository) }
 	if len(app.branch) > 0 { delete(app.branch) }
@@ -65,6 +80,8 @@ history_app_destroy :: proc(app: ^History_App) {
 	if len(app.selected_id) > 0 { delete(app.selected_id) }
 	if len(app.error_text) > 0 { delete(app.error_text) }
 	if len(app.detail_error) > 0 { delete(app.detail_error) }
+	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
+	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app^ = {}
 }
 
@@ -120,12 +137,32 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 	app.detail_loading = false
 	app.detail_files_scroll_y = 0
 	app.detail_scroll_node = 0
+	app.selected_file_index = -1
+	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
+	app.selected_file_path = ""
+	history_invalidate_patch(app)
+}
+
+history_reset_patch_storage :: proc(app: ^History_App) {
+	file_patch_destroy(&app.patch)
+	if len(app.patch_error) > 0 { delete(app.patch_error) }
+	app.patch_error = ""
+	app.patch_loading = false
+	app.patch_scroll_y = 0
+	app.patch_viewport_height = 0
+	app.patch_scroll_node = 0
 }
 
 history_invalidate_detail :: proc(app: ^History_App) {
 	app.next_detail_id += 1
 	app.latest_detail_id = app.next_detail_id
 	history_reset_detail_storage(app)
+}
+
+history_invalidate_patch :: proc(app: ^History_App) {
+	app.next_patch_id += 1
+	app.latest_patch_id = app.next_patch_id
+	history_reset_patch_storage(app)
 }
 
 history_worker_submit_detail :: proc(app: ^History_App) -> bool {
@@ -153,6 +190,51 @@ history_worker_submit_detail :: proc(app: ^History_App) -> bool {
 		return false
 	}
 	return true
+}
+
+patch_result_is_current :: proc(app: ^History_App, result_id: Patch_Request_ID) -> bool {
+	return result_id == app.latest_patch_id
+}
+
+history_worker_submit_patch :: proc(app: ^History_App) -> bool {
+	if !app.has_selection || app.selected_file_index < 0 || app.selected_file_index >= len(app.detail.files) {
+		history_invalidate_patch(app)
+		return false
+	}
+	file := app.detail.files[app.selected_file_index]
+	app.next_patch_id += 1
+	app.latest_patch_id = app.next_patch_id
+	file_patch_destroy(&app.patch)
+	if len(app.patch_error) > 0 { delete(app.patch_error) }
+	app.patch_error = ""
+	app.patch_loading = true
+	app.patch_scroll_y = 0
+	request := new(Git_Request)
+	request.kind = .Load_File_Patch
+	request.patch_id = app.next_patch_id
+	request.repository, _ = strings.clone(app.repository)
+	request.commit_id, _ = strings.clone(app.selected_id)
+	request.file_path, _ = strings.clone(file.path)
+	if len(request.repository) == 0 || len(request.commit_id) == 0 || len(request.file_path) == 0 ||
+		!git_worker_request(&app.worker, request) {
+		git_request_destroy(request)
+		app.patch_loading = false
+		app.patch_error, _ = strings.clone("File patch request could not be queued")
+		return false
+	}
+	return true
+}
+
+history_select_file_index :: proc(app: ^History_App, index: int) -> bool {
+	if index < 0 || index >= len(app.detail.files) { return false }
+	file := app.detail.files[index]
+	if app.selected_file_index == index && app.selected_file_path == file.path { return false }
+	copy, err := strings.clone(file.path)
+	if err != nil { return false }
+	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
+	app.selected_file_path = copy
+	app.selected_file_index = index
+	return history_worker_submit_patch(app)
 }
 
 history_worker_wake :: proc(data: rawptr) {
@@ -186,6 +268,23 @@ history_on_stop :: proc(state: rawptr) {
 }
 
 history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool {
+	if result.kind == .Load_File_Patch {
+		if !patch_result_is_current(app, result.patch_id) || !app.has_selection ||
+			(len(result.error_text) == 0 && result.patch.path != app.selected_file_path) {
+			history_result_destroy(result)
+			free(result)
+			return false
+		}
+		history_reset_patch_storage(app)
+		app.patch = result.patch
+		result.patch = {}
+		app.patch_error = result.error_text
+		result.error_text = ""
+		app.patch_loading = false
+		history_result_destroy(result)
+		free(result)
+		return true
+	}
 	if result.kind == .Load_Commit_Detail {
 		if !detail_result_is_current(app, result.detail_id) || !app.has_selection ||
 			(len(result.error_text) == 0 && result.detail.id != app.selected_id) {
@@ -199,6 +298,10 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		app.detail_error = result.error_text
 		result.error_text = ""
 		app.detail_loading = false
+		if len(app.detail.files) > 0 {
+			app.selected_file_index = -1
+			_ = history_select_file_index(app, 0)
+		}
 		history_result_destroy(result)
 		free(result)
 		return true
@@ -225,6 +328,9 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 	app.loading = false
 	app.result_count += 1
 	history_rebuild_visible(app)
+	if app.select_first_on_load && !app.has_selection && len(app.visible) > 0 {
+		history_select_visible_index(app, 0)
+	}
 	if !app.has_selection { history_invalidate_detail(app) }
 	history_result_destroy(result)
 	free(result)
@@ -242,6 +348,12 @@ history_poll_results :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
 	}
 	for {
 		result, ok := chan.try_recv(app.worker.detail_results)
+		if !ok || result == nil { break }
+		accepted := history_adopt_result(app, result)
+		if accepted { changed = true }
+	}
+	for {
+		result, ok := chan.try_recv(app.worker.patch_results)
 		if !ok || result == nil { break }
 		accepted := history_adopt_result(app, result)
 		if accepted { changed = true }

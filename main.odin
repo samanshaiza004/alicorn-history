@@ -25,6 +25,7 @@ main :: proc() {
 		free(app)
 	}
 	if app == nil { os.exit(1) }
+	app.select_first_on_load = has_argument("--select-first")
 	application := host.Application{
 		state=rawptr(app),
 		title="Alicorn History",

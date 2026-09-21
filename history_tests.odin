@@ -86,6 +86,97 @@ history_test_file_stats :: proc(failures: ^int) {
 	history_test_expect(failures, history_file_stats_text(text) == "+23 -7", "numeric numstat values retain their readable form")
 }
 
+history_test_patch_parser :: proc(failures: ^int) {
+	fixture := "diff --git a/main.odin b/main.odin\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/main.odin\n" +
+		"+++ b/main.odin\n" +
+		"@@ -1,2 +1,3 @@ package main\n" +
+		" package main\n" +
+		"-old\n" +
+		"+new\n" +
+		"+tail\n" +
+		"\\ No newline at end of file\n"
+	fixture_data := make([dynamic]u8, 0, len(fixture))
+	append(&fixture_data, fixture)
+	patch, error_text := git_parse_patch(fixture_data[:])
+	delete(fixture_data)
+	history_test_expect(failures, len(error_text) == 0, "structured patch parser accepts a unified hunk")
+	history_test_expect(failures, len(patch.hunks) == 1, "structured patch parser returns one hunk")
+	if len(patch.hunks) == 1 {
+		history_test_expect(failures, patch.hunks[0].old_start == 1 && patch.hunks[0].new_start == 1, "hunk header preserves line origins")
+		history_test_expect(failures, len(patch.hunks[0].lines) == 5, "hunk parser retains context, additions, deletion, and metadata")
+		if len(patch.hunks[0].lines) >= 4 {
+			history_test_expect(failures, patch.hunks[0].lines[1].kind == .Deletion, "deletion line kind is structured")
+			history_test_expect(failures, patch.hunks[0].lines[2].kind == .Addition, "addition line kind is structured")
+			history_test_expect(failures, patch.hunks[0].lines[3].new_line == 3, "added line advances new source numbering")
+		}
+	}
+	file_patch_destroy(&patch)
+	if len(error_text) > 0 { delete(error_text) }
+
+	binary_fixture := "diff --git a/image.bin b/image.bin\nBinary files a/image.bin and b/image.bin differ\n"
+	binary_data := make([dynamic]u8, 0, len(binary_fixture))
+	append(&binary_data, binary_fixture)
+	binary, binary_error := git_parse_patch(binary_data[:])
+	delete(binary_data)
+	history_test_expect(failures, len(binary_error) == 0 && binary.binary, "binary patch is represented explicitly")
+	history_test_expect(failures, len(binary.metadata) == 1, "binary patch keeps its diagnostic metadata")
+	file_patch_destroy(&binary)
+	if len(binary_error) > 0 { delete(binary_error) }
+}
+
+history_test_patch_generation :: proc(failures: ^int) {
+	app := History_App{
+		has_selection=true,
+		latest_patch_id=Patch_Request_ID(2),
+		selected_file_index=0,
+	}
+	app.selected_id, _ = strings.clone("commit")
+	app.selected_file_path, _ = strings.clone("main.odin")
+	defer {
+		if len(app.selected_id) > 0 { delete(app.selected_id) }
+		if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
+		file_patch_destroy(&app.patch)
+		if len(app.patch_error) > 0 { delete(app.patch_error) }
+	}
+
+	stale := new(History_Result)
+	stale.kind = .Load_File_Patch
+	stale.patch_id = Patch_Request_ID(1)
+	stale.patch.path, _ = strings.clone("main.odin")
+	history_test_expect(failures, !history_adopt_result(&app, stale), "stale patch generation is rejected")
+
+	current := new(History_Result)
+	current.kind = .Load_File_Patch
+	current.patch_id = Patch_Request_ID(2)
+	current.patch.path, _ = strings.clone("main.odin")
+	current.patch.metadata = make([dynamic]string, 0, 1)
+	metadata, _ := strings.clone("mode 100644")
+	append(&current.patch.metadata, metadata)
+	history_test_expect(failures, history_adopt_result(&app, current), "current patch generation is adopted")
+	history_test_expect(failures, len(app.patch.metadata) == 1, "current patch payload reaches the diff pane")
+}
+
+history_test_large_patch :: proc(failures: ^int) {
+	data := make([dynamic]u8, 0, 48*5000)
+	append(&data, "diff --git a/large.odin b/large.odin\n")
+	append(&data, "--- a/large.odin\n+++ b/large.odin\n")
+	append(&data, "@@ -1,0 +1,5000 @@\n")
+	for _ in 0..<5000 { append(&data, "+line\n") }
+	patch, error_text := git_parse_patch(data[:])
+	delete(data)
+	history_test_expect(failures, len(error_text) == 0, "large unified patch parses without an error")
+	history_test_expect(failures, len(patch.hunks) == 1, "large unified patch retains its hunk")
+	if len(patch.hunks) == 1 {
+		history_test_expect(failures, len(patch.hunks[0].lines) == 5000, "large unified patch retains every source line")
+		history_test_expect(failures, patch.hunks[0].lines[4999].new_line == 5000, "large unified patch preserves final line numbering")
+	}
+	history_test_expect(failures, history_patch_display_count(patch) == 5001, "large patch display includes the hunk header")
+	file_patch_destroy(&patch)
+	if len(error_text) > 0 { delete(error_text) }
+}
+
 history_test_clean_object_id :: proc(value: string) -> bool {
 	for byte in value {
 		if byte == '\n' || byte == '\r' || byte == 0 { return false }
@@ -117,6 +208,9 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_worker_shutdown_stress(&failures, repository)
 	history_test_detail_generation_domains(&failures)
 	history_test_file_stats(&failures)
+	history_test_patch_parser(&failures)
+	history_test_patch_generation(&failures)
+	history_test_large_patch(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix", "-z",
@@ -128,11 +222,20 @@ history_run_tests :: proc(repository: string) -> bool {
 		history_test_expect(&failures, len(real_error) == 0, "real repository output parses completely")
 		history_test_expect(&failures, len(real_commits) > 0, "real repository produces commits")
 		limit := min(len(real_commits), 3)
+		patch_tested := false
 		for i := 0; i < limit; i += 1 {
 			history_test_expect(&failures, history_test_clean_object_id(real_commits[i].id), fmt.tprintf("parsed commit %d has no record-separator bytes", i))
 			detail, detail_error := git_load_commit_detail(repository, real_commits[i].id)
 			history_test_expect(&failures, len(detail_error) == 0, fmt.tprintf("commit detail query succeeds for parsed commit %d", i))
 			history_test_expect(&failures, detail.id == real_commits[i].id, fmt.tprintf("commit detail preserves stable identity for parsed commit %d", i))
+			if !patch_tested && len(detail.files) > 0 {
+				patch, patch_error := git_load_file_patch(repository, real_commits[i].id, detail.files[0].path)
+				history_test_expect(&failures, len(patch_error) == 0, "selected file patch query succeeds")
+				history_test_expect(&failures, patch.path == detail.files[0].path, "selected file patch preserves its path")
+				file_patch_destroy(&patch)
+				if len(patch_error) > 0 { delete(patch_error) }
+				patch_tested = true
+			}
 			// Empty commits are valid Git objects; a successful detail query does
 			// not require at least one changed file.
 			commit_detail_destroy(&detail)
