@@ -12,6 +12,153 @@ history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
 	}
 }
 
+history_test_append_ref_record :: proc(data: ^[dynamic]u8, full_name, object_id, object_type, peeled_id, peeled_type, head, symref: string) {
+	append(data, full_name)
+	append(data, u8(0))
+	append(data, object_id)
+	append(data, u8(0))
+	append(data, object_type)
+	append(data, u8(0))
+	append(data, peeled_id)
+	append(data, u8(0))
+	append(data, peeled_type)
+	append(data, u8(0))
+	append(data, head)
+	append(data, u8(0))
+	append(data, symref)
+	append(data, u8(0))
+	append(data, "\n")
+}
+
+history_test_find_ref :: proc(refs: [dynamic]Git_Ref, full_name: string) -> (index: int, found: bool) {
+	index = -1
+	for ref, i in refs {
+		if ref.full_name == full_name { return i, true }
+	}
+	return
+}
+
+history_test_make_ref :: proc(full_name, short_name, object_id, target_commit_id: string, kind: Git_Ref_Kind, is_head: bool = false) -> Git_Ref {
+	ref := Git_Ref{kind=kind, is_head=is_head}
+	ref.full_name, _ = strings.clone(full_name)
+	ref.short_name, _ = strings.clone(short_name)
+	ref.object_id, _ = strings.clone(object_id)
+	if len(target_commit_id) > 0 { ref.target_commit_id, _ = strings.clone(target_commit_id) }
+	return ref
+}
+
+history_test_refs_parser :: proc(failures: ^int) {
+	commit_oid := "1111111111111111111111111111111111111111"
+	other_commit_oid := "2222222222222222222222222222222222222222"
+	branch_oid := "3333333333333333333333333333333333333333"
+	tag_object_oid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tree_oid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	nested_tag_oid := "cccccccccccccccccccccccccccccccccccccccc"
+	fixture := make([dynamic]u8, 0, 1024)
+	history_test_append_ref_record(&fixture, "refs/heads/main", commit_oid, "commit", "", "", "*", "")
+	history_test_append_ref_record(&fixture, "refs/heads/feature/foo", branch_oid, "commit", "", "", " ", "")
+	history_test_append_ref_record(&fixture, "refs/remotes/origin/main", other_commit_oid, "commit", "", "", " ", "")
+	history_test_append_ref_record(&fixture, "refs/remotes/origin/HEAD", other_commit_oid, "commit", "", "", " ", "refs/remotes/origin/main")
+	history_test_append_ref_record(&fixture, "refs/tags/v0.1", other_commit_oid, "commit", "", "", " ", "")
+	history_test_append_ref_record(&fixture, "refs/tags/release", tag_object_oid, "tag", commit_oid, "commit", " ", "")
+	history_test_append_ref_record(&fixture, "refs/tags/tree-tag", tag_object_oid, "tag", tree_oid, "tree", " ", "")
+	history_test_append_ref_record(&fixture, "refs/tags/nested-tag", tag_object_oid, "tag", nested_tag_oid, "tag", " ", "")
+	refs, error_text := git_parse_refs(fixture[:])
+	delete(fixture)
+	history_test_expect(failures, len(error_text) == 0, "NUL-delimited for-each-ref records parse successfully")
+	history_test_expect(failures, len(refs) == 7, "symbolic remote HEAD alias is omitted while real refs remain")
+
+	main_index, main_found := history_test_find_ref(refs, "refs/heads/main")
+	history_test_expect(failures, main_found, "full branch ref name is retained as identity")
+	if main_found {
+		history_test_expect(failures, refs[main_index].short_name == "main" && refs[main_index].kind == .Branch, "branch displays its short name and kind")
+		history_test_expect(failures, refs[main_index].is_head, "HEAD marker survives the NUL parser")
+		history_test_expect(failures, refs[main_index].target_commit_id == commit_oid, "branch target resolves to its commit")
+	}
+	feature_index, feature_found := history_test_find_ref(refs, "refs/heads/feature/foo")
+	history_test_expect(failures, feature_found && refs[feature_index].short_name == "feature/foo", "nested branch names retain their slash suffix")
+	remote_index, remote_found := history_test_find_ref(refs, "refs/remotes/origin/main")
+	history_test_expect(failures, remote_found && refs[remote_index].short_name == "origin/main" && refs[remote_index].kind == .Remote, "remote refs display origin and branch name")
+	light_tag_index, light_tag_found := history_test_find_ref(refs, "refs/tags/v0.1")
+	history_test_expect(failures, light_tag_found && refs[light_tag_index].target_commit_id == other_commit_oid, "lightweight tag directly resolves to its commit")
+	annotated_index, annotated_found := history_test_find_ref(refs, "refs/tags/release")
+	history_test_expect(failures, annotated_found, "annotated tag remains visible")
+	if annotated_found {
+		history_test_expect(failures, refs[annotated_index].object_id == tag_object_oid, "annotated tag object identity is preserved")
+		history_test_expect(failures, refs[annotated_index].target_commit_id == commit_oid, "annotated tag selects its peeled commit rather than the tag object")
+	}
+	tree_index, tree_found := history_test_find_ref(refs, "refs/tags/tree-tag")
+	history_test_expect(failures, tree_found && len(refs[tree_index].target_commit_id) == 0, "tag to a tree is visible but cannot be selected as a commit")
+	nested_index, nested_found := history_test_find_ref(refs, "refs/tags/nested-tag")
+	history_test_expect(failures, nested_found && len(refs[nested_index].target_commit_id) == 0, "tag-to-tag ref is not mistaken for a commit")
+	_, symbolic_found := history_test_find_ref(refs, "refs/remotes/origin/HEAD")
+	history_test_expect(failures, !symbolic_found, "symbolic remote HEAD is not shown as a duplicate")
+	git_refs_destroy(refs)
+	if len(error_text) > 0 { delete(error_text) }
+
+	truncated := make([dynamic]u8, 0, 32)
+	append(&truncated, "refs/heads/main")
+	append(&truncated, u8(0))
+	partial, truncated_error := git_parse_refs(truncated[:])
+	delete(truncated)
+	history_test_expect(failures, len(truncated_error) > 0 && len(partial) == 0, "truncated ref records fail safely without returning partial refs")
+	git_refs_destroy(partial)
+	if len(truncated_error) > 0 { delete(truncated_error) }
+	empty_refs, empty_error := git_parse_refs(nil)
+	history_test_expect(failures, len(empty_error) == 0 && len(empty_refs) == 0, "repositories with no refs produce a valid empty snapshot")
+	git_refs_destroy(empty_refs)
+	if len(empty_error) > 0 { delete(empty_error) }
+}
+
+history_test_ref_snapshot_adoption :: proc(failures: ^int) {
+	app := History_App{latest_history_id=History_Request_ID(3)}
+	app.visible = make([dynamic]int, 0, 4)
+	app.ref_rows = make([dynamic]Ref_List_Row, 0, 8)
+	old_id := "4444444444444444444444444444444444444444"
+	old_commit := Commit{}
+	old_commit.id, _ = strings.clone(old_id)
+	old_commit.subject, _ = strings.clone("old snapshot")
+	app.commits = make([dynamic]Commit, 0, 1)
+	append(&app.commits, old_commit)
+	app.refs = make([dynamic]Git_Ref, 0, 1)
+	append(&app.refs, history_test_make_ref("refs/heads/old", "old", old_id, old_id, .Branch))
+	history_rebuild_ref_rows(&app)
+
+	stale := new(History_Result)
+	stale.kind = .Load_History
+	stale.history_id = History_Request_ID(2)
+	stale.refs = make([dynamic]Git_Ref, 0, 1)
+	append(&stale.refs, history_test_make_ref("refs/heads/stale", "stale", old_id, old_id, .Branch))
+	history_test_expect(failures, !history_adopt_result(&app, stale), "stale history result carrying refs is rejected")
+	history_test_expect(failures, len(app.refs) == 1 && app.refs[0].full_name == "refs/heads/old", "stale snapshot leaves currently adopted refs intact")
+
+	failed := new(History_Result)
+	failed.kind = .Load_History
+	failed.history_id = History_Request_ID(3)
+	failed.error_text, _ = strings.clone("refs query failed")
+	failed.refs = make([dynamic]Git_Ref, 0, 1)
+	append(&failed.refs, history_test_make_ref("refs/heads/partial", "partial", old_id, old_id, .Branch))
+	history_test_expect(failures, history_adopt_result(&app, failed), "current failed snapshot updates its error state")
+	history_test_expect(failures, len(app.refs) == 1 && app.refs[0].full_name == "refs/heads/old", "failed ref query cannot publish a partial snapshot")
+
+	current := new(History_Result)
+	current.kind = .Load_History
+	current.history_id = History_Request_ID(3)
+	current.branch, _ = strings.clone("main")
+	current.commits = make([dynamic]Commit, 0, 1)
+	new_id := "5555555555555555555555555555555555555555"
+	new_commit := Commit{}
+	new_commit.id, _ = strings.clone(new_id)
+	new_commit.subject, _ = strings.clone("new snapshot")
+	append(&current.commits, new_commit)
+	current.refs = make([dynamic]Git_Ref, 0, 1)
+	append(&current.refs, history_test_make_ref("refs/heads/main", "main", new_id, new_id, .Branch, true))
+	history_test_expect(failures, history_adopt_result(&app, current), "current history and refs snapshot is adopted")
+	history_test_expect(failures, len(app.commits) == 1 && app.commits[0].id == new_id, "new commits are adopted from the snapshot")
+	history_test_expect(failures, len(app.refs) == 1 && app.refs[0].full_name == "refs/heads/main" && app.refs[0].target_commit_id == new_id, "new refs are adopted with the same snapshot")
+	history_app_destroy(&app)
+}
+
 history_test_refresh_releases_commit_storage :: proc(failures: ^int) {
 	base_allocator := context.allocator
 	tracking: mem.Tracking_Allocator
@@ -30,6 +177,9 @@ history_test_refresh_releases_commit_storage :: proc(failures: ^int) {
 		history_test_expect(failures, history_adopt_result(&app, result), "current refresh result is adopted")
 	}
 	history_destroy_commits(&app)
+	commit_dag_destroy(&app.dag)
+	git_refs_destroy(app.refs)
+	if app.ref_rows != nil { delete(app.ref_rows) }
 	delete(app.visible)
 	context.allocator = base_allocator
 	history_test_expect(failures, len(tracking.allocation_map) == 0, "repeated refreshes release replaced commit backing storage")
@@ -179,6 +329,50 @@ history_test_large_patch :: proc(failures: ^int) {
 	if len(error_text) > 0 { delete(error_text) }
 }
 
+history_test_ref_selection_visibility :: proc(failures: ^int) {
+	app := history_app_new(".")
+	if app == nil {
+		history_test_expect(failures, false, "ref selection fixture allocates its application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.loading = false
+	app.commits = make([dynamic]Commit, 0, 80)
+	target_id := ""
+	for i := 0; i < 80; i += 1 {
+		id := fmt.tprintf("%040x", i+1)
+		subject := "work commit"
+		if i == 0 { subject = "head commit" }
+		if i == 79 { subject = "target commit" }
+		commit := Commit{}
+		commit.id, _ = strings.clone(id)
+		commit.subject, _ = strings.clone(subject)
+		append(&app.commits, commit)
+		if i == 79 { target_id = app.commits[i].id }
+	}
+	app.refs = make([dynamic]Git_Ref, 0, 1)
+	append(&app.refs, history_test_make_ref("refs/heads/feature/target", "feature/target", target_id, target_id, .Branch))
+	history_rebuild_ref_rows(app)
+	app.filter, _ = strings.clone("head")
+	history_rebuild_visible(app)
+	history_test_expect(failures, len(app.visible) == 1, "filter initially hides the ref target commit")
+
+	found, changed, filter_changed, visible_position := history_select_ref(app, 0)
+	history_test_expect(failures, found && changed, "clicking a commit ref selects its target")
+	history_test_expect(failures, filter_changed && len(app.filter) == 0, "ref navigation clears a filter that hides its target")
+	history_test_expect(failures, visible_position == 79 && app.has_selection && app.selected_id == target_id, "selected target is exposed at its visible list position")
+
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
+	defer alicorn.destroy_runtime(&rt)
+	_ = history_build(rawptr(app), &rt, 1200, 800, 1)
+	_ = alicorn.virtual_list_ensure_visible(&rt, app.history_scroll_node, visible_position, "ref target commit visibility test")
+	scroll := alicorn.scroll_region_state(&rt, app.history_scroll_node)
+	history_test_expect(failures, scroll.offset_y > 0 && scroll.offset_y <= scroll.max_scroll_y, "ref target commit is scrolled into the history viewport")
+}
+
 history_test_view_layout_and_focus :: proc(failures: ^int) {
 	app := history_app_new(".")
 	if app == nil {
@@ -200,6 +394,10 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 		commit.subject, _ = strings.clone(subject)
 		append(&app.commits, commit)
 	}
+	app.refs = make([dynamic]Git_Ref, 0, 2)
+	append(&app.refs, history_test_make_ref("refs/heads/main", "main", app.commits[0].id, app.commits[0].id, .Branch, true))
+	append(&app.refs, history_test_make_ref("refs/remotes/origin/main", "origin/main", app.commits[1].id, app.commits[1].id, .Remote))
+	history_rebuild_ref_rows(app)
 	history_rebuild_visible(app)
 
 	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
@@ -219,16 +417,75 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 	} else {
 		history_test_expect(failures, false, "history scroll region is retained")
 	}
+	if graph, ok := rt.nodes[app.commit_graph_node]; ok && app.commit_graph_node != 0 {
+		history_test_expect(failures, graph.surface_geometry_active && len(graph.surface_circles) > 0, "commit DAG is retained as copied typed GPU geometry")
+		scroll_state := alicorn.scroll_region_state(&rt, app.history_scroll_node)
+		row_column: ^alicorn.Node = nil
+		for _, node in rt.nodes { if node.label == "history-commit-rows" { row_column = node } }
+		if row_column != nil && len(graph.surface_circles) > 0 && len(app.visible) > 0 {
+			first_commit := app.commits[app.visible[0]]
+			first_label := fmt.tprintf("%s  %s", commit_short_id(first_commit), first_commit.subject)
+			first_row: ^alicorn.Node = nil
+			for _, node in rt.nodes {
+				if node.kind == .Button && node.label == first_label { first_row = node; break }
+			}
+			if first_row != nil {
+				marker_y := graph.bounds.y + graph.surface_circles[0].center.y
+				row_y := first_row.bounds.y + first_row.bounds.h*0.5
+				delta := marker_y-row_y
+				if delta < 0 { delta = -delta }
+				history_test_expect(failures, graph.bounds.h == scroll_state.viewport_height && row_column.bounds.h == scroll_state.viewport_height, "DAG gutter and rows share the resolved scroll viewport height")
+				history_test_expect(failures, delta < 0.1 && row_column.bounds.x >= graph.bounds.x+graph.bounds.w, "DAG markers align to virtualized commit row centers without overlapping text")
+			} else {
+				history_test_expect(failures, false, "first visible commit row remains addressable beside its DAG marker")
+			}
+		} else {
+			history_test_expect(failures, false, "DAG gutter and commit rows are retained as adjacent siblings")
+		}
+	} else {
+		history_test_expect(failures, false, "history view creates its commit DAG surface")
+	}
+	if alicorn.scroll_region_set_offset(&rt, app.history_scroll_node, 17, "DAG fractional alignment test") {
+		_ = history_build(rawptr(app), &rt, 1200, 800, 2)
+		if graph, ok := rt.nodes[app.commit_graph_node]; ok && len(graph.surface_circles) > 0 {
+			first_commit := app.commits[app.visible[0]]
+			first_label := fmt.tprintf("%s  %s", commit_short_id(first_commit), first_commit.subject)
+			first_row: ^alicorn.Node = nil
+			for _, node in rt.nodes {
+				if node.kind == .Button && node.label == first_label { first_row = node; break }
+			}
+			if first_row != nil {
+				marker_y := graph.bounds.y + graph.surface_circles[0].center.y
+				row_y := first_row.bounds.y + first_row.bounds.h*0.5
+				delta := marker_y-row_y
+				if delta < 0 { delta = -delta }
+				history_test_expect(failures, alicorn.scroll_region_offset(&rt, app.history_scroll_node) == 17 && delta < 0.1, "DAG markers remain pixel-aligned with text rows at fractional scroll offsets")
+			} else {
+				history_test_expect(failures, false, "fractionally scrolled first commit row remains realized")
+			}
+		} else {
+			history_test_expect(failures, false, "fractional scroll retains the DAG surface geometry")
+		}
+	}
+	refs_panel: ^alicorn.Node = nil
+	history_panel: ^alicorn.Node = nil
 	detail_panel: ^alicorn.Node = nil
 	for _, node in rt.nodes {
-		if node.label == "history-detail-panel" { detail_panel = node; break }
+		if node.label == "history-refs-panel" { refs_panel = node }
+		if node.label == "history-list-panel" { history_panel = node }
+		if node.label == "history-detail-panel" { detail_panel = node }
 	}
-	if detail_panel != nil {
-		history_test_expect(failures, detail_panel.parent != 0, "history detail panel is retained under the main row")
-		history_test_expect(failures, detail_panel.bounds.x > 500, "history detail panel is a sibling beside the commit list")
+	if refs_panel != nil && history_panel != nil && detail_panel != nil {
+		history_test_expect(failures, refs_panel.parent != 0 && refs_panel.parent == history_panel.parent && refs_panel.parent == detail_panel.parent, "refs, history, and detail panels are siblings under the main row")
+		history_test_expect(failures, refs_panel.bounds.x < history_panel.bounds.x && history_panel.bounds.x < detail_panel.bounds.x, "three-pane order is refs, history, then detail")
+		history_test_expect(failures, refs_panel.bounds.w == 220 && history_panel.bounds.x > refs_panel.bounds.x+refs_panel.bounds.w, "fixed-width refs pane precedes the fixed history pane")
 		history_test_expect(failures, detail_panel.bounds.y >= 0 && detail_panel.bounds.y+detail_panel.bounds.h <= rt.viewport.h, "history detail panel remains inside the window")
 	} else {
-		history_test_expect(failures, false, "history detail panel is retained")
+		history_test_expect(failures, false, "three-pane refs/history/detail layout is retained")
+	}
+	history_test_expect(failures, app.refs_scroll_node != 0, "refs sidebar uses a retained scroll region")
+	if refs := alicorn.scroll_region_state(&rt, app.refs_scroll_node); app.refs_scroll_node != 0 {
+		history_test_expect(failures, refs.viewport_height > 0, "refs sidebar has a visible viewport")
 	}
 	if next := alicorn.focus_traverse(&rt, .Next); next != 0 {
 		history_test_expect(failures, next != app.filter_node, "focus traversal advances past the filter")
@@ -264,6 +521,8 @@ history_run_tests :: proc(repository: string) -> bool {
 	current := History_App{latest_history_id=History_Request_ID(7)}
 	history_test_expect(&failures, history_result_is_current(&current, History_Request_ID(7)), "latest history generation is accepted")
 	history_test_expect(&failures, !history_result_is_current(&current, History_Request_ID(6)), "stale history generation is rejected")
+	history_test_refs_parser(&failures)
+	history_test_ref_snapshot_adoption(&failures)
 	history_test_refresh_releases_commit_storage(&failures)
 	history_test_worker_shutdown_stress(&failures, repository)
 	history_test_detail_generation_domains(&failures)
@@ -271,7 +530,10 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_patch_parser(&failures)
 	history_test_patch_generation(&failures)
 	history_test_large_patch(&failures)
+	history_test_ref_selection_visibility(&failures)
 	history_test_view_layout_and_focus(&failures)
+	history_test_dag_geometry(&failures)
+	history_test_large_dag_virtual_projection(&failures)
 
 	stdout, stderr, _, command_ok := git_run(repository, []string{
 		"log", "--all", "--topo-order", "--date=unix", "-z",
@@ -282,6 +544,52 @@ history_run_tests :: proc(repository: string) -> bool {
 		real_commits, real_error := git_parse_log(stdout)
 		history_test_expect(&failures, len(real_error) == 0, "real repository output parses completely")
 		history_test_expect(&failures, len(real_commits) > 0, "real repository produces commits")
+		refs_stdout, refs_stderr, refs_exit_code, refs_command_ok := git_run(repository, []string{
+			"for-each-ref",
+			"--sort=refname",
+			"--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(HEAD)%00%(symref)%00",
+			"refs/heads",
+			"refs/remotes",
+			"refs/tags",
+		})
+		history_test_expect(&failures, refs_command_ok, "installed Git can enumerate structured refs")
+		if refs_command_ok {
+			real_refs, refs_error := git_parse_refs(refs_stdout)
+			history_test_expect(&failures, len(refs_error) == 0, "real for-each-ref output parses completely")
+			if len(refs_error) == 0 {
+				head_count := 0
+				for ref in real_refs {
+					if ref.is_head { head_count += 1 }
+					if len(ref.target_commit_id) == 0 { continue }
+					history_test_expect(&failures, git_ref_oid_valid(ref.target_commit_id), "selectable ref targets a full Git object id")
+					if len(real_error) == 0 {
+						target_found := false
+						for commit in real_commits {
+							if commit.id == ref.target_commit_id { target_found = true; break }
+						}
+						history_test_expect(&failures, target_found, fmt.tprintf("ref %s targets a commit in the history snapshot", ref.full_name))
+					}
+				}
+				history_test_expect(&failures, head_count <= 1, "at most one enumerated ref is marked HEAD")
+				branch := git_repository_branch(repository)
+				if branch != "detached" {
+					head_branch_found := false
+					for ref in real_refs {
+						if ref.kind == .Branch && ref.is_head && ref.short_name == branch {
+							head_branch_found = true
+							break
+						}
+					}
+					history_test_expect(&failures, head_branch_found, "current local branch matches the structured HEAD ref")
+				}
+				if len(branch) > 0 { delete(branch) }
+			}
+			git_refs_destroy(real_refs)
+			if len(refs_error) > 0 { delete(refs_error) }
+		}
+		if len(refs_stdout) > 0 { delete(refs_stdout) }
+		if len(refs_stderr) > 0 { delete(refs_stderr) }
+		_ = refs_exit_code
 		limit := min(len(real_commits), 3)
 		patch_tested := false
 		for i := 0; i < limit; i += 1 {

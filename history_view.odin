@@ -12,6 +12,16 @@ SELECT_BG  :: alicorn.Color{0.18, 0.35, 0.56, 1}
 HISTORY_COMMIT_ROW_HEIGHT :: f32(44)
 HISTORY_FILE_ROW_HEIGHT   :: f32(32)
 HISTORY_PATCH_LINE_HEIGHT :: f32(22)
+HISTORY_REF_ROW_HEIGHT    :: f32(24)
+
+history_ref_heading :: proc(kind: Git_Ref_Kind) -> (label, key: string) {
+	#partial switch kind {
+	case .Branch: return "Branches", "history-refs-heading-branches"
+	case .Remote: return "Remotes", "history-refs-heading-remotes"
+	case .Tag:    return "Tags", "history-refs-heading-tags"
+	}
+	return "", "history-refs-heading-unknown"
+}
 
 history_file_status_text :: proc(status: File_Status) -> string {
 	#partial switch status {
@@ -93,6 +103,10 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	first_build := app.filter_node == 0
 	selection_changed := false
 	file_selection_changed := false
+	refs_filter_changed := false
+	refs_selection_position := -1
+	commit_graph_first := 0
+	commit_graph_last := 0
 
 	root_style := alicorn.layout_style(padding=12, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
@@ -119,8 +133,58 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 
 	alicorn.container_begin(&ui, .Container, label="history-main", style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true))
+	alicorn.container_begin(&ui, .Container, label="history-refs-panel", style=alicorn.layout_style(width=220, padding=8, gap=6, clip=true), color=PANEL_BG)
+	alicorn.text(&ui, fmt.tprintf("Refs (%d)", len(app.refs)), style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+	ref_list := alicorn.virtual_list_begin(
+		&ui,
+		len(app.ref_rows),
+		HISTORY_REF_ROW_HEIGHT,
+		key=alicorn.key_string("history-refs-scroll"),
+		style=alicorn.layout_style(grow=1, clip=true),
+		label="history-ref-list",
+		axes=.Vertical,
+	)
+	app.refs_scroll_node = ref_list.scroll.id
+	for position := ref_list.first; position < ref_list.last; position += 1 {
+		row := app.ref_rows[position]
+		if row.is_header {
+			heading, heading_key := history_ref_heading(row.kind)
+			if !alicorn.component_begin(&ui, alicorn.key_string(heading_key)) { continue }
+			alicorn.text(&ui, heading, style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT, padding=4), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+			alicorn.component_end(&ui)
+			continue
+		}
+		if row.ref_index < 0 || row.ref_index >= len(app.refs) { continue }
+		ref := app.refs[row.ref_index]
+		if !alicorn.component_begin(&ui, alicorn.key_string(ref.full_name)) { continue }
+		label := ref.short_name
+		if ref.is_head { label = fmt.tprintf("%s  (HEAD)", ref.short_name) }
+		selected := app.has_selection && len(ref.target_commit_id) > 0 && app.selected_id == ref.target_commit_id
+		clicked := alicorn.button(
+			&ui,
+			label,
+			state=alicorn.Button_State{selected=selected, disabled=len(ref.target_commit_id) == 0},
+			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT, padding=4),
+		)
+		if clicked {
+			found, changed, filter_changed, visible_position := history_select_ref(app, row.ref_index)
+			if found {
+				if changed { selection_changed = true }
+				if filter_changed { refs_filter_changed = true }
+				refs_selection_position = visible_position
+			}
+		}
+		alicorn.component_end(&ui)
+	}
+	alicorn.virtual_list_end(&ui, ref_list)
+	alicorn.container_end(&ui)
+
 	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.layout_style(width=500, padding=8, gap=6, clip=true), color=PANEL_BG)
-	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+	dag_gutter_width := history_dag_gutter_width(app.dag.lane_count)
+	alicorn.container_begin(&ui, .Container, label="history-commit-heading", style=alicorn.layout_style(.Row, height=26))
+	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.layout_style(.Row, height=26, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+	alicorn.text(&ui, "DAG", style=alicorn.layout_style(.Row, width=dag_gutter_width, height=26, align=.Center), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+	alicorn.container_end(&ui)
 	commit_list := alicorn.virtual_list_begin(
 		&ui,
 		len(app.visible),
@@ -131,6 +195,21 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		axes=.Vertical,
 	)
 	app.history_scroll_node = commit_list.scroll.id
+	commit_graph_first = commit_list.first
+	commit_graph_last = commit_list.last
+	app.commit_graph_node = 0
+	if len(app.visible) > 0 {
+		viewport_height := commit_list.scroll.viewport_height
+		alicorn.container_begin(&ui, .Container, label="history-commit-graph-rows", style=alicorn.layout_style(.Row, height=viewport_height, clip=true))
+		app.commit_graph_node = alicorn.gpu_geometry_surface(
+			&ui,
+			"history-commit-dag",
+			0,
+			alicorn.layout_style(.Row, width=dag_gutter_width, height=viewport_height, clip=true),
+			dpi_scale,
+		)
+		alicorn.container_begin(&ui, .Container, label="history-commit-rows", style=alicorn.layout_style(.Column, grow=1, height=viewport_height, clip=true))
+	}
 	for position := commit_list.first; position < commit_list.last; position += 1 {
 		commit := app.commits[app.visible[position]]
 		if !alicorn.component_begin(&ui, alicorn.key_string(commit.id)) { continue }
@@ -148,6 +227,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	if len(app.visible) == 0 && !app.loading {
 		alicorn.text(&ui, "No matching commits", style=alicorn.layout_style(.Row, height=30, padding=4))
 	}
+	if len(app.visible) > 0 { alicorn.container_end(&ui) }
+	if len(app.visible) > 0 { alicorn.container_end(&ui) }
 	alicorn.virtual_list_end(&ui, commit_list)
 	alicorn.container_end(&ui)
 
@@ -249,6 +330,38 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 
 	alicorn.container_end(&ui)
 	alicorn.end_frame(&ui)
+	if app.commit_graph_node == 0 {
+		app.graph_geometry_node = 0
+		app.graph_geometry_key = {}
+	} else if ctx, ok := alicorn.gpu_surface_context(rt, app.commit_graph_node); ok {
+		if app.graph_geometry_node != app.commit_graph_node {
+			app.graph_geometry_node = app.commit_graph_node
+			app.graph_geometry_key = {}
+		}
+		key := history_dag_geometry_key(app, commit_graph_first, commit_graph_last, ctx.logical_bounds.w, ctx.logical_bounds.h)
+		if key != app.graph_geometry_key {
+			if app.graph_segments == nil { app.graph_segments = make([dynamic]alicorn.GPU_Surface_Line_Segment, 0, 128) }
+			if app.graph_circles == nil { app.graph_circles = make([dynamic]alicorn.GPU_Surface_Filled_Circle, 0, 64) }
+			history_dag_build_geometry(
+				app.dag,
+				app.commits[:],
+				app.visible[:],
+				commit_graph_first,
+				commit_graph_last,
+				HISTORY_COMMIT_ROW_HEIGHT,
+				ctx.logical_bounds.w,
+				app.selected_commit_index,
+				len(app.filter) > 0,
+				&app.graph_segments,
+				&app.graph_circles,
+			)
+			app.graph_geometry_revision += 1
+			if app.graph_geometry_revision == 0 { app.graph_geometry_revision = 1 }
+			if alicorn.gpu_surface_update_geometry(rt, app.commit_graph_node, app.graph_geometry_revision, app.graph_segments[:], app.graph_circles[:]) {
+				app.graph_geometry_key = key
+			}
+		}
+	}
 	app.filter_node = filter_id
 	if first_build && filter_id != 0 {
 		// Start the application in a deterministic keyboard-ready state. The
@@ -262,6 +375,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	if file_selection_changed {
 		alicorn.invalidate_root(rt, "history file selection changed")
+	}
+	if refs_filter_changed && !selection_changed {
+		alicorn.invalidate_root(rt, "filter cleared to reveal selected ref")
+	}
+	if refs_selection_position >= 0 {
+		_ = alicorn.virtual_list_ensure_visible(rt, app.history_scroll_node, refs_selection_position, "ref target commit visibility")
 	}
 	_ = dpi_scale
 	_ = logical_width

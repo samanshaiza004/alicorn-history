@@ -84,7 +84,36 @@ git_worker_proc :: proc(data: rawptr) {
 					if len(stdout) > 0 { delete(stdout) }
 					if len(stderr) > 0 { delete(stderr) }
 				}
+				refs_stdout, refs_stderr, refs_exit_code, refs_command_ok := git_run(result.repository, []string{
+					"for-each-ref",
+					"--sort=refname",
+					"--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(HEAD)%00%(symref)%00",
+					"refs/heads",
+					"refs/remotes",
+					"refs/tags",
+				})
+				if !refs_command_ok {
+					if len(result.error_text) == 0 {
+						result.error_text = git_error_text(refs_stderr, refs_exit_code)
+					}
+				} else {
+					parsed_refs, refs_error := git_parse_refs(refs_stdout)
+					if len(refs_error) == 0 {
+						result.refs = parsed_refs
+					} else if len(result.error_text) == 0 {
+						result.error_text = refs_error
+						refs_error = ""
+					}
+					if len(refs_error) > 0 { delete(refs_error) }
+				}
+				if len(refs_stdout) > 0 { delete(refs_stdout) }
+				if len(refs_stderr) > 0 { delete(refs_stderr) }
 				result.branch = git_repository_branch(result.repository)
+				if len(result.error_text) == 0 {
+					// Lane assignment is snapshot work, not presentation work. Keep
+					// large histories off the UI thread alongside the Git queries.
+					result.dag = commit_dag_layout(result.commits[:])
+				}
 			} else if kind == .Load_Commit_Detail {
 				result.detail, result.error_text = git_load_commit_detail(result.repository, commit_id)
 			} else if kind == .Load_File_Patch {

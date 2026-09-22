@@ -10,6 +10,9 @@ History_App :: struct {
 	repository:          string,
 	branch:              string,
 	commits:             [dynamic]Commit,
+	dag:                  Commit_DAG_Layout,
+	refs:                [dynamic]Git_Ref,
+	ref_rows:            [dynamic]Ref_List_Row,
 	visible:             [dynamic]int,
 	filter:              string,
 	selected_id:         string,
@@ -17,6 +20,14 @@ History_App :: struct {
 	selected_commit_index: int,
 	filter_node:         alicorn.Node_ID,
 	history_scroll_node: alicorn.Node_ID,
+	commit_graph_node:   alicorn.Node_ID,
+	graph_segments:      [dynamic]alicorn.GPU_Surface_Line_Segment,
+	graph_circles:       [dynamic]alicorn.GPU_Surface_Filled_Circle,
+	dag_generation:      u64,
+	graph_geometry_key:  History_DAG_Geometry_Key,
+	graph_geometry_revision: u64,
+	graph_geometry_node: alicorn.Node_ID,
+	refs_scroll_node:    alicorn.Node_ID,
 	loading:             bool,
 	error_text:          string,
 	next_history_id:     History_Request_ID,
@@ -54,6 +65,7 @@ history_app_new :: proc(repository: string) -> ^History_App {
 	app.selected_commit_index = -1
 	app.selected_file_index = -1
 	app.visible = make([dynamic]int, 0, 1024)
+	app.ref_rows = make([dynamic]Ref_List_Row, 0, 64)
 	return app
 }
 
@@ -61,9 +73,14 @@ history_app_destroy :: proc(app: ^History_App) {
 	if app == nil { return }
 	git_worker_destroy(&app.worker)
 	history_destroy_commits(app)
+	commit_dag_destroy(&app.dag)
+	git_refs_destroy(app.refs)
+	if app.ref_rows != nil { delete(app.ref_rows) }
 	commit_detail_destroy(&app.detail)
 	file_patch_destroy(&app.patch)
 	delete(app.visible)
+	delete(app.graph_segments)
+	delete(app.graph_circles)
 	if len(app.repository) > 0 { delete(app.repository) }
 	if len(app.branch) > 0 { delete(app.branch) }
 	if len(app.filter) > 0 { delete(app.filter) }
@@ -365,16 +382,40 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		free(result)
 		return true
 	}
+	if len(result.error_text) > 0 {
+		// Publish refs and commits as one snapshot. If either history query
+		// failed, retain the previous snapshot rather than showing partial data.
+		if len(app.error_text) > 0 { delete(app.error_text) }
+		app.error_text = result.error_text
+		result.error_text = ""
+		app.loading = false
+		history_result_destroy(result)
+		free(result)
+		return true
+	}
 	if app.pending_repository_active {
 		if len(app.pending_repository) > 0 { delete(app.pending_repository) }
 		app.pending_repository = ""
 		app.pending_repository_active = false
 	}
 	history_destroy_commits(app)
+	commit_dag_destroy(&app.dag)
+	git_refs_destroy(app.refs)
 	if len(app.branch) > 0 { delete(app.branch) }
 	if len(app.error_text) > 0 { delete(app.error_text) }
 	app.commits = result.commits
 	result.commits = {}
+	app.dag = result.dag
+	result.dag = {}
+	if len(app.dag.nodes) != len(app.commits) {
+		commit_dag_destroy(&app.dag)
+		app.dag = commit_dag_layout(app.commits[:])
+	}
+	app.dag_generation += 1
+	app.graph_geometry_key = {}
+	app.refs = result.refs
+	result.refs = {}
+	history_rebuild_ref_rows(app)
 	app.branch = result.branch
 	result.branch = ""
 	app.error_text = result.error_text
@@ -426,6 +467,22 @@ history_poll_results :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
 	if changed { alicorn.invalidate_root(rt, "git history result adopted") }
 }
 
+history_append_ref_section :: proc(app: ^History_App, kind: Git_Ref_Kind) {
+	append(&app.ref_rows, Ref_List_Row{kind=kind, ref_index=-1, is_header=true})
+	for ref, index in app.refs {
+		if ref.kind == kind {
+			append(&app.ref_rows, Ref_List_Row{kind=kind, ref_index=index})
+		}
+	}
+}
+
+history_rebuild_ref_rows :: proc(app: ^History_App) {
+	clear(&app.ref_rows)
+	history_append_ref_section(app, .Branch)
+	history_append_ref_section(app, .Remote)
+	history_append_ref_section(app, .Tag)
+}
+
 history_rebuild_visible :: proc(app: ^History_App) {
 	clear(&app.visible)
 	for commit, index in app.commits {
@@ -455,6 +512,43 @@ history_rebuild_visible :: proc(app: ^History_App) {
 			app.selected_commit_index = -1
 		}
 	}
+}
+
+history_select_ref :: proc(app: ^History_App, ref_index: int) -> (found: bool, selection_changed: bool, filter_changed: bool, visible_position: int) {
+	visible_position = -1
+	if ref_index < 0 || ref_index >= len(app.refs) { return }
+	target_id := app.refs[ref_index].target_commit_id
+	if len(target_id) == 0 { return }
+
+	commit_index := -1
+	for commit, index in app.commits {
+		if commit.id == target_id {
+			commit_index = index
+			break
+		}
+	}
+	if commit_index < 0 { return }
+
+	if len(app.filter) > 0 {
+		delete(app.filter)
+		app.filter = ""
+		history_rebuild_visible(app)
+		filter_changed = true
+	}
+	for position, index in app.visible {
+		if index == commit_index {
+			visible_position = position
+			break
+		}
+	}
+	if visible_position < 0 { return }
+
+	selection_changed = !app.has_selection || app.selected_id != target_id
+	if selection_changed {
+		history_select_visible_index(app, visible_position)
+	}
+	found = true
+	return
 }
 
 history_ascii_lower :: proc(value: u8) -> u8 {

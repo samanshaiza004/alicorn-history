@@ -46,7 +46,7 @@ ALICORN_ODIN=/path/to/odin ./tools/run.sh /path/to/repository
 
 The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
 
-## Phase 1–3 scope
+## Phase 1–5 scope
 
 - repository path and current branch summary;
 - asynchronous `git log` loading;
@@ -54,6 +54,8 @@ The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
 - mouse and keyboard selection;
 - asynchronous commit details and changed-file summaries;
 - selectable changed files with asynchronous latest-wins patch loading;
+- a read-only refs sidebar for local branches, remotes, and tags;
+- ref navigation that selects the target commit and reveals it in the history list;
 - deterministic first-parent unified patches from Git;
 - structured hunk/line parsing with binary and mode-change fallbacks;
 - virtualized, no-wrap diff rows with fixed line-number gutters and retained
@@ -62,6 +64,10 @@ The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
 - an independent latest-wins patch request lane;
 - first-parent semantics for merge commit details;
 - retained scroll-region routing for the history and detail panes;
+- full-snapshot commit-DAG lane assignment with a GPU-rendered gutter aligned
+  to the virtualized commit rows;
+- marker-only graph presentation while filtering, so compacted rows never
+  imply fabricated parent connections;
 - explicit refresh;
 - no blocking Git command on the UI thread;
 - no periodic application tick while idle;
@@ -71,12 +77,30 @@ The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
 
 The machine-readable Git log uses NUL-separated records (`git log -z`), and
 the parser defensively ignores record-separator newlines so every parsed object
-ID can be used directly in a subsequent Git query. Patch commands disable user
-diff helpers and interpret Git-provided paths literally. Merge changes are
-shown relative to the first parent; root commits compare against the empty
-tree. Refs and the DAG remain intentionally separate phases.
+ID can be used directly in a subsequent Git query. Ref names and object IDs are
+read from NUL-delimited git for-each-ref fields as part of the same history
+snapshot as the commit log. Clicking a branch or commit-pointing tag selects
+its commit and clears a filter if needed to reveal it; symbolic remote HEAD
+aliases and tags that do not resolve directly to a commit are not selectable.
+Patch commands disable user diff helpers and interpret Git-provided paths
+literally. Merge changes are shown relative to the first parent; root commits
+compare against the empty tree. Ref navigation never changes repository state.
+
+The commit graph is derived from the same full commit snapshot and parent IDs
+used by the detail view. The lane model is UI/GPU independent and is built on
+the Git worker; the visible viewport is projected into a small set of local
+line segments and commit markers. Its geometry surface shares the commit
+virtual list's retained scroll region, clipping, row height, and fractional
+position. While a text filter compacts the history, only commit markers are
+shown: edges are omitted rather than rewriting Git topology or connecting
+non-adjacent matches.
 
 The diff viewer is deliberately not a code editor: it has no syntax
 highlighting, editing, staging, checkout, or write operations. It is a
 structured, virtualized unified-patch view intended to pressure large text,
 horizontal scrolling, independent async selection, and true idle behavior.
+
+Phase 5 completes the intended read-only dogfood scope. History now covers
+asynchronous repository data, refs, commit details, unified patches, and a
+retained GPU commit graph. Further Git-client features are deliberately out of
+scope; the remaining value should come from a different dogfood workload.

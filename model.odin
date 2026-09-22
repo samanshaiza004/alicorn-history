@@ -136,6 +136,27 @@ Commit :: struct {
 	subject:      string,
 }
 
+Git_Ref_Kind :: enum {
+	Branch,
+	Remote,
+	Tag,
+}
+
+Git_Ref :: struct {
+	full_name:        string,
+	short_name:       string,
+	object_id:        string,
+	target_commit_id: string,
+	kind:             Git_Ref_Kind,
+	is_head:          bool,
+}
+
+Ref_List_Row :: struct {
+	kind:      Git_Ref_Kind,
+	ref_index: int,
+	is_header: bool,
+}
+
 History_Result :: struct {
 	kind:       Git_Request_Kind,
 	history_id: History_Request_ID,
@@ -144,6 +165,8 @@ History_Result :: struct {
 	repository: string,
 	branch:     string,
 	commits:    [dynamic]Commit,
+	dag:        Commit_DAG_Layout,
+	refs:       [dynamic]Git_Ref,
 	detail:     Commit_Detail,
 	patch:      File_Patch,
 	error_text: string,
@@ -203,9 +226,24 @@ history_result_destroy :: proc(result: ^History_Result) {
 		delete(commit.parents)
 	}
 	delete(result.commits)
+	commit_dag_destroy(&result.dag)
+	git_refs_destroy(result.refs)
 	commit_detail_destroy(&result.detail)
 	file_patch_destroy(&result.patch)
 	result^ = {}
+}
+
+git_ref_destroy :: proc(ref: ^Git_Ref) {
+	if len(ref.full_name) > 0 { delete(ref.full_name) }
+	if len(ref.short_name) > 0 { delete(ref.short_name) }
+	if len(ref.object_id) > 0 { delete(ref.object_id) }
+	if len(ref.target_commit_id) > 0 { delete(ref.target_commit_id) }
+	ref^ = {}
+}
+
+git_refs_destroy :: proc(refs: [dynamic]Git_Ref) {
+	for &ref in refs { git_ref_destroy(&ref) }
+	if refs != nil { delete(refs) }
 }
 
 commit_destroy :: proc(commit: ^Commit) {
