@@ -96,7 +96,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 
 	root_style := alicorn.layout_style(padding=12, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
-	alicorn.text(&ui, "Alicorn History", style=alicorn.layout_style(.Row, height=28))
+	alicorn.text(&ui, "Alicorn History", style=alicorn.layout_style(.Row, height=28), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 
 	status := "Loading history..."
 	if !app.loading {
@@ -108,8 +108,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_begin(&ui, .Container, label="history-actions", style=alicorn.layout_style(.Row, height=34, gap=8))
 	filter_style := alicorn.layout_style(.Row, height=34, grow=1)
 	filter_id := alicorn.text_field(&ui, app.filter, key=alicorn.key_string("history-filter"), style=filter_style)
-	open_clicked := alicorn.button(&ui, "Open Repository...", key=alicorn.key_string("history-open-repository"), style=alicorn.layout_style(.Row, width=190, height=30))
-	refresh_clicked := alicorn.button(&ui, "Refresh", key=alicorn.key_string("history-refresh"), style=alicorn.layout_style(.Row, width=100, height=30))
+	open_clicked := alicorn.button(&ui, "Open Repository...", key=alicorn.key_string("history-open-repository"), style=alicorn.layout_style(.Row, width=190, height=30), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+	refresh_clicked := alicorn.button(&ui, "Refresh", key=alicorn.key_string("history-refresh"), style=alicorn.layout_style(.Row, width=100, height=30), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
 	alicorn.container_end(&ui)
 	if open_clicked {
 		history_open_repository(app, rt)
@@ -120,7 +120,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 
 	alicorn.container_begin(&ui, .Container, label="history-main", style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true))
 	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.layout_style(width=500, padding=8, gap=6, clip=true), color=PANEL_BG)
-	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.layout_style(.Row, height=26))
+	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 	commit_list := alicorn.virtual_list_begin(
 		&ui,
 		len(app.visible),
@@ -136,7 +136,9 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		if !alicorn.component_begin(&ui, alicorn.key_string(commit.id)) { continue }
 		selected := app.has_selection && app.selected_id == commit.id
 		label := fmt.tprintf("%s  %s", commit_short_id(commit), commit.subject)
-		clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected}, style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=4))
+		row_weight := alicorn.FONT_WEIGHT_REGULAR
+		if selected { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
+		clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected}, style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=4), text_style=alicorn.Text_Style{font_weight=row_weight})
 		if clicked {
 			history_select_visible_index(app, position)
 			selection_changed = true
@@ -152,7 +154,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_begin(&ui, .Container, label="history-detail-panel", style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true), color=PANEL_BG)
 	if app.has_selection && app.selected_commit_index >= 0 && app.selected_commit_index < len(app.commits) {
 		commit := app.commits[app.selected_commit_index]
-		alicorn.text(&ui, commit.subject, style=alicorn.layout_style(.Row, height=34))
+		alicorn.text(&ui, commit.subject, style=alicorn.layout_style(.Row, height=34), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 		alicorn.text(&ui, fmt.tprintf("%s\n%s <%s>\n%s\nParents: %d", commit.id, commit.author_name, commit.author_email, commit_date_text(commit.timestamp), len(commit.parents)), style=alicorn.layout_style(height=82))
 		if app.detail_loading {
 			alicorn.text(&ui, "Loading commit details...", style=alicorn.layout_style(.Row, height=28))
@@ -162,7 +164,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			if len(app.detail.body) > 0 {
 				alicorn.text(&ui, app.detail.body, style=alicorn.layout_style(height=66, clip=true))
 			}
-			alicorn.text(&ui, fmt.tprintf("Changed files (%d)", len(app.detail.files)), style=alicorn.layout_style(.Row, height=26))
+			alicorn.text(&ui, fmt.tprintf("Changed files (%d)", len(app.detail.files)), style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 				file_list := alicorn.virtual_list_begin(
 					&ui,
 					len(app.detail.files),
@@ -178,7 +180,9 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					stats := history_file_stats_text(file)
 					selected_file := position == app.selected_file_index && file.path == app.selected_file_path
 					label := fmt.tprintf("%s  %-8s %s", history_file_status_text(file.status), stats, file.path)
-					clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected_file}, style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=2))
+					row_weight := alicorn.FONT_WEIGHT_REGULAR
+					if selected_file { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
+					clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected_file}, style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=2), text_style=alicorn.Text_Style{font_weight=row_weight})
 					if clicked {
 						if history_select_file_index(app, position) { file_selection_changed = true }
 					}
@@ -190,7 +194,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			if app.selected_file_index >= 0 && app.selected_file_index < len(app.detail.files) {
 				patch_title = fmt.tprintf("Patch: %s", app.selected_file_path)
 			}
-			alicorn.text(&ui, patch_title, style=alicorn.layout_style(.Row, height=26))
+			alicorn.text(&ui, patch_title, style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 			if app.patch_loading {
 				alicorn.text(&ui, "Loading patch...", style=alicorn.layout_style(.Row, height=26))
 			} else if len(app.patch_error) > 0 {
