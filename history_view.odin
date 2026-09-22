@@ -98,9 +98,15 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	alicorn.text(&ui, fmt.tprintf("%s\n%s", app.repository, status), style=alicorn.Layout_Style{.Row, -1, 40, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 
-	filter_style := alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 0, 0, 8, .Stretch, false}
+	alicorn.container_begin(&ui, .Container, label="history-actions", style=alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 0, 0, 8, .Stretch, false})
+	filter_style := alicorn.Layout_Style{.Row, -1, 34, 0, -1, 0, -1, 1, 0, 0, .Stretch, false}
 	filter_id := alicorn.text_field(&ui, app.filter, key=alicorn.key_string("history-filter"), style=filter_style)
+	open_clicked := alicorn.button(&ui, "Open Repository...", key=alicorn.key_string("history-open-repository"), style=alicorn.Layout_Style{.Row, 190, 30, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 	refresh_clicked := alicorn.button(&ui, "Refresh", key=alicorn.key_string("history-refresh"), style=alicorn.Layout_Style{.Row, 100, 30, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+	alicorn.container_end(&ui)
+	if open_clicked {
+		history_open_repository(app, rt)
+	}
 	if refresh_clicked {
 		if history_worker_submit(app) { alicorn.invalidate_root(rt, "history refresh requested") }
 	}

@@ -32,6 +32,8 @@ main :: proc() {
 		width=1200,
 		height=800,
 		on_start=history_on_start,
+		on_services=history_on_services,
+		on_dialog=history_on_dialog,
 		build=history_build,
 		on_text_change=history_on_text_change,
 		on_key=history_on_key,

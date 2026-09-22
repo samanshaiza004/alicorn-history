@@ -90,8 +90,10 @@ git_worker_proc :: proc(data: rawptr) {
 			} else if kind == .Load_File_Patch {
 				result.patch, result.error_text = git_load_file_patch(result.repository, commit_id, file_path)
 			}
+			// file_path was transferred out of request before request was
+			// destroyed. The local copy is released here; never read the freed
+			// request again after git_request_destroy.
 			if len(file_path) > 0 { delete(file_path) }
-			if len(request.file_path) > 0 { delete(request.file_path) }
 			if len(commit_id) > 0 { delete(commit_id) }
 			if !git_worker_deliver(worker, result) {
 				git_worker_destroy_result(result)
