@@ -29,8 +29,9 @@ pixel density:     2
 display scale:     2
 ```
 
-The vendor submodule was already at the latest fetched Alicorn `master` commit
-(`0797bc5`), so no framework transplant was needed for this app port.
+The current validation branch repins the vendor submodule to Alicorn
+`165eb54`, which contains the retained horizontal-scroll fix and the native
+dialog host service used by this app.
 
 ## Tests and native runs
 
