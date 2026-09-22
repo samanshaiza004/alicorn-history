@@ -77,6 +77,11 @@ File_Patch :: struct {
 	binary:   bool,
 	metadata: [dynamic]string,
 	hunks:    [dynamic]Diff_Hunk,
+	// Display rows are an owned index into the patch's existing strings. The
+	// text fields borrow metadata/hunk storage; only the index array itself is
+	// owned here. This keeps visible-row lookup O(1) without duplicating text.
+	display_lines: [dynamic]Patch_Display_Line,
+	content_width: f32,
 }
 
 Patch_Display_Line :: struct {
@@ -85,6 +90,30 @@ Patch_Display_Line :: struct {
 	new_line: int,
 	text:     string,
 	hunk:     bool,
+}
+
+history_patch_prepare_display :: proc(patch: ^File_Patch) {
+	if patch == nil || patch.display_lines != nil { return }
+	capacity := len(patch.metadata) + 1
+	for hunk in patch.hunks { capacity += 1 + len(hunk.lines) }
+	patch.display_lines = make([dynamic]Patch_Display_Line, 0, capacity)
+	width: f32 = 720
+	for metadata in patch.metadata {
+		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text=metadata})
+		width = max(width, f32(len(metadata))*8 + 24)
+	}
+	for hunk in patch.hunks {
+		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text=hunk.header, hunk=true})
+		width = max(width, f32(len(hunk.header))*8 + 24)
+		for line in hunk.lines {
+			append(&patch.display_lines, Patch_Display_Line{kind=line.kind, old_line=line.old_line, new_line=line.new_line, text=line.text})
+			width = max(width, f32(len(line.text))*8 + 160)
+		}
+	}
+	if len(patch.display_lines) == 0 && patch.binary {
+		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text="Binary file changed"})
+	}
+	patch.content_width = min(width, 4096)
 }
 
 Commit_Detail :: struct {
@@ -138,6 +167,7 @@ file_patch_destroy :: proc(patch: ^File_Patch) {
 	delete(patch.metadata)
 	for &hunk in patch.hunks { diff_hunk_destroy(&hunk) }
 	delete(patch.hunks)
+	delete(patch.display_lines)
 	patch^ = {}
 }
 

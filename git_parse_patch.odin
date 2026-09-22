@@ -164,6 +164,7 @@ git_parse_patch :: proc(data: []byte) -> (patch: File_Patch, error_text: string)
 		if advance_old { old_line += 1 }
 		if advance_new { new_line += 1 }
 	}
+	history_patch_prepare_display(&patch)
 	return
 }
 

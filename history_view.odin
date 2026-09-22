@@ -9,6 +9,10 @@ HEADER_BG  :: alicorn.Color{0.08, 0.13, 0.22, 1}
 ROW_BG     :: alicorn.Color{0.10, 0.17, 0.28, 1}
 SELECT_BG  :: alicorn.Color{0.18, 0.35, 0.56, 1}
 
+HISTORY_COMMIT_ROW_HEIGHT :: f32(44)
+HISTORY_FILE_ROW_HEIGHT   :: f32(32)
+HISTORY_PATCH_LINE_HEIGHT :: f32(22)
+
 history_file_status_text :: proc(status: File_Status) -> string {
 	#partial switch status {
 	case .Modified: return "M"
@@ -28,6 +32,7 @@ history_file_stats_text :: proc(file: Changed_File) -> string {
 }
 
 history_patch_display_count :: proc(patch: File_Patch) -> int {
+	if len(patch.display_lines) > 0 { return len(patch.display_lines) }
 	count := len(patch.metadata)
 	for hunk in patch.hunks { count += 1 + len(hunk.lines) }
 	if count == 0 && patch.binary { return 1 }
@@ -36,6 +41,7 @@ history_patch_display_count :: proc(patch: File_Patch) -> int {
 
 history_patch_display_line :: proc(patch: File_Patch, index: int) -> (line: Patch_Display_Line, ok: bool) {
 	if index < 0 { return }
+	if index < len(patch.display_lines) { return patch.display_lines[index], true }
 	position := 0
 	for metadata in patch.metadata {
 		if position == index { return Patch_Display_Line{kind=.Meta, text=metadata}, true }
@@ -58,6 +64,7 @@ history_patch_display_line :: proc(patch: File_Patch, index: int) -> (line: Patc
 }
 
 history_patch_content_width :: proc(patch: File_Patch) -> f32 {
+	if patch.content_width > 0 { return patch.content_width }
 	width: f32 = 720
 	for metadata in patch.metadata {
 		width = max(width, f32(len(metadata))*8 + 24)
@@ -112,7 +119,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 
 	alicorn.container_begin(&ui, .Container, label="history-main", style=alicorn.Layout_Style{.Row, -1, -1, 0, -1, 0, -1, 1, 0, 12, .Stretch, true})
-	app.row_height = 44
+	app.row_height = HISTORY_COMMIT_ROW_HEIGHT
 
 	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.Layout_Style{.Column, 500, -1, 0, -1, 0, -1, 0, 8, 6, .Stretch, true}, color=PANEL_BG)
 	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.Layout_Style{.Row, -1, 26, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
@@ -122,6 +129,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		content_height=f32(len(app.visible))*app.row_height,
 		line_height=app.row_height,
 		style=alicorn.Layout_Style{.Column, -1, -1, 0, -1, 0, -1, 1, 0, 0, .Stretch, true},
+		axes=.Vertical,
 	)
 	app.history_scroll_node = history_scroll.id
 	app.list_viewport_height = history_scroll.viewport_height
@@ -165,21 +173,22 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				&ui,
 				key=alicorn.key_string("history-detail-files-scroll"),
 				viewport_height=132,
-				content_height=f32(len(app.detail.files))*app.row_height,
-				line_height=app.row_height,
+				content_height=f32(len(app.detail.files))*HISTORY_FILE_ROW_HEIGHT,
+				line_height=HISTORY_FILE_ROW_HEIGHT,
 				style=alicorn.Layout_Style{.Column, -1, 132, 0, -1, 0, -1, 0, 0, 0, .Stretch, true},
+				axes=.Vertical,
 			)
 			app.detail_scroll_node = detail_scroll.id
 			app.detail_file_viewport_height = detail_scroll.viewport_height
 			app.detail_files_scroll_y = detail_scroll.offset_y
-			file_metrics := alicorn.virtual_list_metrics(len(app.detail.files), app.detail_files_scroll_y, app.detail_file_viewport_height, app.row_height)
+			file_metrics := alicorn.virtual_list_metrics(len(app.detail.files), app.detail_files_scroll_y, app.detail_file_viewport_height, HISTORY_FILE_ROW_HEIGHT)
 			alicorn.container_begin(&ui, .Virtual_List, label="history-detail-files", style=alicorn.Layout_Style{.Column, -1, detail_scroll.viewport_height, 0, -1, 0, -1, 0, 0, 0, .Stretch, true}, scroll_offset_y=file_metrics.offset_y, layout_scroll_offset_y=file_metrics.leading_offset_y)
 			for position := file_metrics.first; position < file_metrics.last; position += 1 {
 				file := app.detail.files[position]
 				stats := history_file_stats_text(file)
 				selected_file := position == app.selected_file_index && file.path == app.selected_file_path
 				label := fmt.tprintf("%s  %-8s %s", history_file_status_text(file.status), stats, file.path)
-				clicked := alicorn.button(&ui, label, key=alicorn.key_u64(u64(position)), state=alicorn.Button_State{selected=selected_file}, style=alicorn.Layout_Style{.Row, -1, app.row_height, 0, -1, 0, -1, 0, 2, 0, .Stretch, false})
+				clicked := alicorn.button(&ui, label, key=alicorn.key_u64(u64(position)), state=alicorn.Button_State{selected=selected_file}, style=alicorn.Layout_Style{.Row, -1, HISTORY_FILE_ROW_HEIGHT, 0, -1, 0, -1, 0, 2, 0, .Stretch, false})
 				if clicked {
 					if history_select_file_index(app, position) { file_selection_changed = true }
 				}
@@ -202,26 +211,28 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				patch_scroll := alicorn.scroll_region_begin(
 					&ui,
 					key=alicorn.key_string("history-patch-scroll"),
-					content_height=f32(patch_line_count)*app.row_height,
-					line_height=app.row_height,
+					content_height=f32(patch_line_count)*HISTORY_PATCH_LINE_HEIGHT,
+					line_height=HISTORY_PATCH_LINE_HEIGHT,
 					content_width=patch_content_width,
 					line_width=32,
 					style=alicorn.Layout_Style{.Column, -1, -1, 0, -1, 0, -1, 1, 0, 0, .Stretch, true},
+					axes=.Both,
+					axis_behavior=.Auto_Lock,
 				)
 				app.patch_scroll_node = patch_scroll.id
 				app.patch_viewport_height = patch_scroll.viewport_height
 				app.patch_viewport_width = patch_scroll.viewport_width
 				app.patch_scroll_y = patch_scroll.offset_y
 				app.patch_scroll_x = patch_scroll.offset_x
-				patch_metrics := alicorn.virtual_list_metrics(patch_line_count, app.patch_scroll_y, app.patch_viewport_height, app.row_height)
+				patch_metrics := alicorn.virtual_list_metrics(patch_line_count, app.patch_scroll_y, app.patch_viewport_height, HISTORY_PATCH_LINE_HEIGHT)
 				alicorn.container_begin(&ui, .Virtual_List, label="history-patch-lines", style=alicorn.Layout_Style{.Column, patch_content_width, patch_scroll.viewport_height, 0, -1, 0, -1, 0, 0, 0, .Stretch, true}, scroll_offset_y=patch_metrics.offset_y, layout_scroll_offset_y=patch_metrics.leading_offset_y, layout_scroll_offset_x=patch_scroll.offset_x)
 				for position := patch_metrics.first; position < patch_metrics.last; position += 1 {
 					line, line_ok := history_patch_display_line(app.patch, position)
 					if !line_ok { continue }
 					color := history_diff_line_color(line.kind)
-					alicorn.container_begin(&ui, .Container, label="patch-line", key=alicorn.key_u64(u64(position)), style=alicorn.Layout_Style{.Row, patch_content_width, app.row_height, 0, -1, 0, -1, 0, 2, 0, .Stretch, false}, color=color)
+					alicorn.container_begin(&ui, .Container, label="patch-line", key=alicorn.key_u64(u64(position)), style=alicorn.Layout_Style{.Row, patch_content_width, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 2, 0, .Stretch, false}, color=color)
 					if line.hunk {
-						alicorn.text(&ui, line.text, style=alicorn.Layout_Style{.Row, patch_content_width, app.row_height, 0, -1, 0, -1, 0, 6, 0, .Stretch, false})
+						alicorn.text(&ui, line.text, style=alicorn.Layout_Style{.Row, patch_content_width, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 6, 0, .Stretch, false})
 					} else {
 						old_text := ""
 						new_text := ""
@@ -230,10 +241,10 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 						marker := " "
 						if line.kind == .Addition { marker = "+" }
 						if line.kind == .Deletion { marker = "-" }
-						alicorn.text(&ui, old_text, style=alicorn.Layout_Style{.Row, 58, app.row_height, 0, -1, 0, -1, 0, 4, 0, .End, false})
-						alicorn.text(&ui, new_text, style=alicorn.Layout_Style{.Row, 58, app.row_height, 0, -1, 0, -1, 0, 4, 0, .End, false})
-						alicorn.text(&ui, marker, style=alicorn.Layout_Style{.Row, 22, app.row_height, 0, -1, 0, -1, 0, 2, 0, .Center, false})
-						alicorn.text(&ui, line.text, style=alicorn.Layout_Style{.Row, patch_content_width-138, app.row_height, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+						alicorn.text(&ui, old_text, style=alicorn.Layout_Style{.Row, 58, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 4, 0, .End, false})
+						alicorn.text(&ui, new_text, style=alicorn.Layout_Style{.Row, 58, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 4, 0, .End, false})
+						alicorn.text(&ui, marker, style=alicorn.Layout_Style{.Row, 22, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 2, 0, .Center, false})
+						alicorn.text(&ui, line.text, style=alicorn.Layout_Style{.Row, patch_content_width-138, HISTORY_PATCH_LINE_HEIGHT, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
 					}
 					alicorn.container_end(&ui)
 				}

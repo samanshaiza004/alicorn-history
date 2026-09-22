@@ -173,6 +173,8 @@ history_test_large_patch :: proc(failures: ^int) {
 		history_test_expect(failures, patch.hunks[0].lines[4999].new_line == 5000, "large unified patch preserves final line numbering")
 	}
 	history_test_expect(failures, history_patch_display_count(patch) == 5001, "large patch display includes the hunk header")
+	last_line, last_line_ok := history_patch_display_line(patch, 5000)
+	history_test_expect(failures, last_line_ok && last_line.text == "line" && last_line.new_line == 5000, "large patch display index resolves the final visible row directly")
 	file_patch_destroy(&patch)
 	if len(error_text) > 0 { delete(error_text) }
 }

@@ -336,6 +336,7 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		history_reset_patch_storage(app)
 		app.patch = result.patch
 		result.patch = {}
+		history_patch_prepare_display(&app.patch)
 		app.patch_error = result.error_text
 		result.error_text = ""
 		app.patch_loading = false
