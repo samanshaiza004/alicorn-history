@@ -15,12 +15,8 @@ History_App :: struct {
 	selected_id:         string,
 	has_selection:       bool,
 	selected_commit_index: int,
-	scroll_y:            f32,
-	list_viewport_height: f32,
-	row_height:          f32,
 	filter_node:         alicorn.Node_ID,
 	history_scroll_node: alicorn.Node_ID,
-	detail_scroll_node:  alicorn.Node_ID,
 	loading:             bool,
 	error_text:          string,
 	next_history_id:     History_Request_ID,
@@ -37,13 +33,6 @@ History_App :: struct {
 	patch:               File_Patch,
 	patch_loading:       bool,
 	patch_error:         string,
-	detail_files_scroll_y: f32,
-	detail_file_viewport_height: f32,
-	patch_scroll_y:      f32,
-	patch_scroll_x:      f32,
-	patch_viewport_height: f32,
-	patch_viewport_width:  f32,
-	patch_scroll_node:   alicorn.Node_ID,
 	select_first_on_load: bool,
 	result_count:        u64,
 	build_count:         u64,
@@ -62,10 +51,8 @@ history_app_new :: proc(repository: string) -> ^History_App {
 		return nil
 	}
 	app.repository = copy
-	app.row_height = 44
 	app.selected_commit_index = -1
 	app.selected_file_index = -1
-	app.list_viewport_height = 560
 	app.visible = make([dynamic]int, 0, 1024)
 	return app
 }
@@ -160,8 +147,6 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 	if len(app.detail_error) > 0 { delete(app.detail_error) }
 	app.detail_error = ""
 	app.detail_loading = false
-	app.detail_files_scroll_y = 0
-	app.detail_scroll_node = 0
 	app.selected_file_index = -1
 	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
 	app.selected_file_path = ""
@@ -173,9 +158,6 @@ history_reset_patch_storage :: proc(app: ^History_App) {
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = false
-	app.patch_scroll_y = 0
-	app.patch_viewport_height = 0
-	app.patch_scroll_node = 0
 }
 
 history_invalidate_detail :: proc(app: ^History_App) {
@@ -233,7 +215,6 @@ history_worker_submit_patch :: proc(app: ^History_App) -> bool {
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = true
-	app.patch_scroll_y = 0
 	request := new(Git_Request)
 	request.kind = .Load_File_Patch
 	request.patch_id = app.next_patch_id
@@ -336,6 +317,7 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		history_reset_patch_storage(app)
 		app.patch = result.patch
 		result.patch = {}
+		history_patch_prepare_display(&app.patch)
 		app.patch_error = result.error_text
 		result.error_text = ""
 		app.patch_loading = false
@@ -473,8 +455,6 @@ history_rebuild_visible :: proc(app: ^History_App) {
 			app.selected_commit_index = -1
 		}
 	}
-	metrics := alicorn.virtual_list_metrics(len(app.visible), app.scroll_y, app.list_viewport_height, app.row_height)
-	app.scroll_y = metrics.offset_y
 }
 
 history_ascii_lower :: proc(value: u8) -> u8 {
@@ -507,17 +487,10 @@ history_select_visible_index :: proc(app: ^History_App, position: int) {
 	app.selected_id = copy
 	app.has_selection = true
 	app.selected_commit_index = app.visible[position]
-	if position < int(app.scroll_y / app.row_height) {
-		app.scroll_y = f32(position) * app.row_height
-	} else if f32(position+1)*app.row_height > app.scroll_y+app.list_viewport_height {
-		app.scroll_y = f32(position+1)*app.row_height - app.list_viewport_height
-	}
-	metrics := alicorn.virtual_list_metrics(len(app.visible), app.scroll_y, app.list_viewport_height, app.row_height)
-	app.scroll_y = metrics.offset_y
 }
 
-history_move_selection :: proc(app: ^History_App, delta: int) -> bool {
-	if len(app.visible) == 0 { return false }
+history_move_selection :: proc(app: ^History_App, delta: int) -> (changed: bool, selected_position: int) {
+	if len(app.visible) == 0 { return false, -1 }
 	position := 0
 	if app.has_selection {
 		for i, index in app.visible {
@@ -530,9 +503,9 @@ history_move_selection :: proc(app: ^History_App, delta: int) -> bool {
 	position += delta
 	if position < 0 { position = 0 }
 	if position >= len(app.visible) { position = len(app.visible)-1 }
-	if app.has_selection && app.commits[app.visible[position]].id == app.selected_id { return false }
+	if app.has_selection && app.commits[app.visible[position]].id == app.selected_id { return false, position }
 	history_select_visible_index(app, position)
-	return true
+	return true, position
 }
 
 history_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alicorn.Text_Change) {
@@ -550,17 +523,18 @@ history_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alic
 history_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> bool {
 	app := cast(^History_App)state
 	delta := 0
+	list := alicorn.scroll_region_state(rt, app.history_scroll_node)
 	#partial switch key {
 	case .Up: delta = -1
 	case .Down: delta = 1
-	case .Page_Up: delta = -max(1, int(app.list_viewport_height/app.row_height)-1)
-	case .Page_Down: delta = max(1, int(app.list_viewport_height/app.row_height)-1)
+	case .Page_Up: delta = -max(1, int(list.viewport_height/HISTORY_COMMIT_ROW_HEIGHT)-1)
+	case .Page_Down: delta = max(1, int(list.viewport_height/HISTORY_COMMIT_ROW_HEIGHT)-1)
 	case: return false
 	}
-	changed := history_move_selection(app, delta)
+	changed, position := history_move_selection(app, delta)
 	if changed {
 		_ = history_worker_submit_detail(app)
-		_ = alicorn.scroll_region_set_offset(rt, app.history_scroll_node, app.scroll_y, "history selection visibility")
+		_ = alicorn.virtual_list_ensure_visible(rt, app.history_scroll_node, position, "history selection visibility")
 		alicorn.invalidate_root(rt, "history selection changed")
 	}
 	return changed
