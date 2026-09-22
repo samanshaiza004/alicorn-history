@@ -16,7 +16,7 @@ repository:        alicorn-history
 base commit:       6ca8c476a8ef6cfb9e29d363e31f323fe8929870
 branch:            port/macos-history-6ca8c47
 working tree:      clean before changes
-vendor/alicorn:    0797bc57ac6313651b205b48d9e988e31c9053b
+vendor/alicorn:    165eb5414021e0fc6ca711c7f89e6fd9a0f00cdb
 macOS:             27.0 (26A428)
 machine:           Apple Silicon arm64 MacBook Air (T8103)
 Xcode developer:   /Applications/Xcode.app/Contents/Developer
@@ -75,6 +75,29 @@ The final capture was also visually inspected after converting the host PPM
 artifact to PNG. It showed the selected commit, changed-file list, and a
 rendered unified patch in the corrected two-pane layout.
 
+## Native dialog services gate
+
+History now exposes `Open Repository...` and Ctrl/Cmd+O through the public
+Alicorn host service. The request is an asynchronous SDL 3.4.16 open-folder
+dialog; its callback deep-copies paths and errors before waking the Alicorn
+main thread. A second request is rejected while one dialog is active. The
+selected folder is validated by the existing Git worker, and an invalid
+candidate leaves the currently displayed repository and history intact.
+
+```text
+./tools/dialogs_test.sh
+    PASS — headless fake backend: accepted, cancelled, callback ownership,
+           reopen-after-completion, and busy rejection
+
+./tools/run.sh ... --smoke
+    PASS — production History build against vendor/alicorn 165eb54,
+           SDL 3.4.16, Metal, 2 submissions, 2 retired
+```
+
+The real macOS folder panel has not yet been manually accepted/cancelled in
+this report. Its native callback, shutdown ownership, Unicode/path copying,
+and cross-thread-to-main-thread delivery remain manual desktop checks.
+
 ## Fixes made
 
 ### Close the list panel before opening the detail panel
@@ -129,6 +152,11 @@ retained renderer maps. SDL video, event pumping, text-input synchronization,
 window metrics, GPU command encoding, and shutdown remain on the native main
 thread. Git work runs on an app-owned worker and returns copied results through
 the host wakeup boundary.
+
+The dialog service is also host-owned. History receives only
+`Application_Services.dialogs`, never an SDL window or file-dialog handle.
+Dialog completion callbacks are serialized onto the same application thread
+as all other History state changes.
 
 The application has no periodic tick callback. It woke three times for async
 Git results and otherwise entered the host’s event wait path. Logical window

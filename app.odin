@@ -49,6 +49,9 @@ History_App :: struct {
 	build_count:         u64,
 	worker:              Git_Worker,
 	waker:               host.Application_Waker,
+	dialogs:             host.Dialog_Service,
+	pending_repository:  string,
+	pending_repository_active: bool,
 }
 
 history_app_new :: proc(repository: string) -> ^History_App {
@@ -82,6 +85,7 @@ history_app_destroy :: proc(app: ^History_App) {
 	if len(app.detail_error) > 0 { delete(app.detail_error) }
 	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
+	if len(app.pending_repository) > 0 { delete(app.pending_repository) }
 	app^ = {}
 }
 
@@ -98,12 +102,12 @@ history_destroy_commits :: proc(app: ^History_App) {
 	app.commits = {}
 }
 
-history_worker_submit :: proc(app: ^History_App) -> bool {
+history_worker_submit_repository :: proc(app: ^History_App, repository: string) -> bool {
 	app.next_history_id += 1
 	request := new(Git_Request)
 	request.history_id = app.next_history_id
 	request.kind = .Load_History
-	copy, err := strings.clone(app.repository)
+	copy, err := strings.clone(repository)
 	if err != nil {
 		free(request)
 		return false
@@ -119,6 +123,27 @@ history_worker_submit :: proc(app: ^History_App) -> bool {
 		delete(app.error_text)
 		app.error_text = ""
 	}
+	return true
+}
+
+history_worker_submit :: proc(app: ^History_App) -> bool {
+	return history_worker_submit_repository(app, app.repository)
+}
+
+history_begin_repository_load :: proc(app: ^History_App, repository: string, rt: ^alicorn.Runtime = nil) -> bool {
+	copy, err := strings.clone(repository)
+	if err != nil { return false }
+	if len(app.pending_repository) > 0 { delete(app.pending_repository) }
+	app.pending_repository = copy
+	app.pending_repository_active = true
+	if !history_worker_submit_repository(app, repository) {
+		delete(app.pending_repository)
+		app.pending_repository = ""
+		app.pending_repository_active = false
+		return false
+	}
+	app.loading = true
+	if rt != nil { alicorn.invalidate_root(rt, "repository load requested") }
 	return true
 }
 
@@ -257,6 +282,39 @@ history_on_start :: proc(state: rawptr, waker: host.Application_Waker) {
 	}
 }
 
+history_on_services :: proc(state: rawptr, services: host.Application_Services) {
+	app := cast(^History_App)state
+	app.dialogs = services.dialogs
+}
+
+history_open_repository :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
+	request := host.File_Dialog_Request{
+		id=host.Dialog_ID(1),
+		kind=.Open_Folder,
+		title="Open Git Repository",
+		initial_location=app.repository,
+		allow_many=false,
+		accept_label="Open",
+		cancel_label="Cancel",
+	}
+	if !host.ShowFileDialog(app.dialogs, request) {
+		if len(app.error_text) > 0 { delete(app.error_text) }
+		app.error_text, _ = strings.clone("Open Repository is busy or unavailable")
+		alicorn.invalidate_root(rt, "repository dialog unavailable")
+	}
+}
+
+history_on_dialog :: proc(state: rawptr, rt: ^alicorn.Runtime, result: ^host.File_Dialog_Result) {
+	app := cast(^History_App)state
+	if result == nil || result.status != .Accepted || len(result.paths) == 0 { return }
+	// The host-owned result is borrowed only for this callback. Copy the path
+	// before returning; the dialog bridge releases its storage immediately after.
+	if !history_begin_repository_load(app, result.paths[0], rt) {
+		if len(app.error_text) > 0 { delete(app.error_text) }
+		app.error_text, _ = strings.clone("Selected repository could not be queued")
+	}
+}
+
 history_on_wake :: proc(state: rawptr, rt: ^alicorn.Runtime) {
 	app := cast(^History_App)state
 	history_poll_results(app, rt)
@@ -310,6 +368,25 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		history_result_destroy(result)
 		free(result)
 		return false
+	}
+	if app.pending_repository_active && len(result.error_text) > 0 {
+		// A candidate repository is validated asynchronously. Keep the current
+		// repository and its visible history intact when Git rejects the candidate.
+		if len(app.error_text) > 0 { delete(app.error_text) }
+		app.error_text = result.error_text
+		result.error_text = ""
+		app.loading = false
+		if len(app.pending_repository) > 0 { delete(app.pending_repository) }
+		app.pending_repository = ""
+		app.pending_repository_active = false
+		history_result_destroy(result)
+		free(result)
+		return true
+	}
+	if app.pending_repository_active {
+		if len(app.pending_repository) > 0 { delete(app.pending_repository) }
+		app.pending_repository = ""
+		app.pending_repository_active = false
 	}
 	history_destroy_commits(app)
 	if len(app.branch) > 0 { delete(app.branch) }
