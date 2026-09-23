@@ -132,8 +132,18 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		if history_worker_submit(app) { alicorn.invalidate_root(rt, "history refresh requested") }
 	}
 
-	alicorn.container_begin(&ui, .Container, label="history-main", style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true))
-	alicorn.container_begin(&ui, .Container, label="history-refs-panel", style=alicorn.layout_style(width=220, padding=8, gap=6, clip=true), color=PANEL_BG)
+	outer_split := alicorn.split_begin(
+		&ui,
+		key=alicorn.key_string("history-main-split"),
+		axis=.Horizontal,
+		initial=220,
+		min_first=150,
+		min_second=600,
+		style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true),
+		label="history-main-split",
+	)
+	alicorn.split_first_begin(&ui, outer_split)
+	alicorn.container_begin(&ui, .Container, label="history-refs-panel", style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true), color=PANEL_BG)
 	alicorn.text(&ui, fmt.tprintf("Refs (%d)", len(app.refs)), style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 	ref_list := alicorn.virtual_list_begin(
 		&ui,
@@ -179,8 +189,22 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	alicorn.virtual_list_end(&ui, ref_list)
 	alicorn.container_end(&ui)
+	alicorn.split_first_end(&ui, outer_split)
 
-	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.layout_style(width=500, padding=8, gap=6, clip=true), color=PANEL_BG)
+	alicorn.split_divider(&ui, outer_split)
+	alicorn.split_second_begin(&ui, outer_split)
+	inner_split := alicorn.split_begin(
+		&ui,
+		key=alicorn.key_string("history-list-detail-split"),
+		axis=.Horizontal,
+		initial=500,
+		min_first=300,
+		min_second=280,
+		style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true),
+		label="history-list-detail-split",
+	)
+	alicorn.split_first_begin(&ui, inner_split)
+	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true), color=PANEL_BG)
 	dag_gutter_width := history_dag_gutter_width(app.dag.lane_count)
 	alicorn.container_begin(&ui, .Container, label="history-commit-heading", style=alicorn.layout_style(.Row, height=26))
 	alicorn.container_begin(&ui, .Container, label="history-commit-heading-graph-spacer", style=alicorn.layout_style(.Row, width=dag_gutter_width, height=26))
@@ -233,7 +257,10 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	if len(app.visible) > 0 { alicorn.container_end(&ui) }
 	alicorn.virtual_list_end(&ui, commit_list)
 	alicorn.container_end(&ui)
+	alicorn.split_first_end(&ui, inner_split)
 
+	alicorn.split_divider(&ui, inner_split)
+	alicorn.split_second_begin(&ui, inner_split)
 	alicorn.container_begin(&ui, .Container, label="history-detail-panel", style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true), color=PANEL_BG)
 	if app.has_selection && app.selected_commit_index >= 0 && app.selected_commit_index < len(app.commits) {
 		commit := app.commits[app.selected_commit_index]
@@ -328,9 +355,10 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		alicorn.text(&ui, "Select a commit", style=alicorn.layout_style(.Row, height=30))
 	}
 	alicorn.container_end(&ui)
-	alicorn.container_end(&ui)
-
-	alicorn.container_end(&ui)
+	alicorn.split_second_end(&ui, inner_split)
+	alicorn.split_end(&ui, inner_split)
+	alicorn.split_second_end(&ui, outer_split)
+	alicorn.split_end(&ui, outer_split)
 	alicorn.end_frame(&ui)
 	if app.commit_graph_node == 0 {
 		app.graph_geometry_node = 0
