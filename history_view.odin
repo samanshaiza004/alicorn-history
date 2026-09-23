@@ -165,6 +165,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			label,
 			state=alicorn.Button_State{selected=selected, disabled=len(ref.target_commit_id) == 0},
 			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT, padding=4),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis},
 		)
 		if clicked {
 			found, changed, filter_changed, visible_position := history_select_ref(app, row.ref_index)
@@ -182,8 +183,9 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_begin(&ui, .Container, label="history-list-panel", style=alicorn.layout_style(width=500, padding=8, gap=6, clip=true), color=PANEL_BG)
 	dag_gutter_width := history_dag_gutter_width(app.dag.lane_count)
 	alicorn.container_begin(&ui, .Container, label="history-commit-heading", style=alicorn.layout_style(.Row, height=26))
+	alicorn.container_begin(&ui, .Container, label="history-commit-heading-graph-spacer", style=alicorn.layout_style(.Row, width=dag_gutter_width, height=26))
+	alicorn.container_end(&ui)
 	alicorn.text(&ui, fmt.tprintf("Commits (%d matching)", len(app.visible)), style=alicorn.layout_style(.Row, height=26, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
-	alicorn.text(&ui, "DAG", style=alicorn.layout_style(.Row, width=dag_gutter_width, height=26, align=.Center), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
 	alicorn.container_end(&ui)
 	commit_list := alicorn.virtual_list_begin(
 		&ui,
@@ -217,7 +219,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		label := fmt.tprintf("%s  %s", commit_short_id(commit), commit.subject)
 		row_weight := alicorn.FONT_WEIGHT_REGULAR
 		if selected { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
-		clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected}, style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=4), text_style=alicorn.Text_Style{font_weight=row_weight})
+		clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected}, style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=4), text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
 		if clicked {
 			history_select_visible_index(app, position)
 			selection_changed = true
@@ -263,7 +265,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					label := fmt.tprintf("%s  %-8s %s", history_file_status_text(file.status), stats, file.path)
 					row_weight := alicorn.FONT_WEIGHT_REGULAR
 					if selected_file { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
-					clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected_file}, style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=2), text_style=alicorn.Text_Style{font_weight=row_weight})
+					clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected_file}, style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=2), text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
 					if clicked {
 						if history_select_file_index(app, position) { file_selection_changed = true }
 					}
