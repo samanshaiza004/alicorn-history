@@ -476,9 +476,9 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 		if node.label == "history-detail-panel" { detail_panel = node }
 	}
 	if refs_panel != nil && history_panel != nil && detail_panel != nil {
-		outer := rt.nodes[rt.nodes[refs_panel.parent].parent]
-		inner := rt.nodes[rt.nodes[history_panel.parent].parent]
-		history_test_expect(failures, outer.kind == .Split && inner.kind == .Split && outer.id != inner.id && rt.nodes[detail_panel.parent].parent == inner.id, "refs and history/detail use nested retained splits")
+		inner := rt.nodes[rt.nodes[refs_panel.parent].parent]
+		outer := rt.nodes[rt.nodes[detail_panel.parent].parent]
+		history_test_expect(failures, outer.kind == .Split && inner.kind == .Split && outer.id != inner.id && rt.nodes[history_panel.parent].parent == inner.id && rt.nodes[inner.parent].parent == outer.id, "refs/history group and detail use adjacent-neighbor nested retained splits")
 		history_test_expect(failures, refs_panel.bounds.x < history_panel.bounds.x && history_panel.bounds.x < detail_panel.bounds.x, "three-pane order is refs, history, then detail")
 		history_test_expect(failures, refs_panel.bounds.w == 220 && history_panel.bounds.x > refs_panel.bounds.x+refs_panel.bounds.w, "preferred refs pane width precedes the history pane")
 		history_test_expect(failures, detail_panel.bounds.y >= 0 && detail_panel.bounds.y+detail_panel.bounds.h <= rt.viewport.h, "history detail panel remains inside the window")
