@@ -44,7 +44,14 @@ ALICORN_ODIN=/path/to/odin ./tools/run.sh /path/to/repository
 ./tools/check.sh /path/to/repository
 ```
 
-The macOS validation record is in [MACOS_VALIDATION.md](MACOS_VALIDATION.md).
+Platform validation records:
+
+- [macOS validation](MACOS_VALIDATION.md)
+- [Windows validation](WINDOWS_VALIDATION.md)
+
+The Windows record covers a local build, native launch, selected-commit detail
+and patch loading, and a true-idle proof. This repository does not currently
+run Windows CI.
 
 ## Phase 1–5 scope
 

@@ -1,6 +1,13 @@
 # Alicorn History macOS Validation
 
-Status: **REVISE**
+Status: **Historical capture; current macOS verification confirmed by the maintainer on 2026-10-02.**
+
+This file preserves detailed evidence from an earlier validation branch. The
+maintainer has since verified the current History application on macOS. The
+latest macOS run's exact host details and output were not captured in this
+record. The historical "Unverified areas" and recommendation below describe
+only the earlier capture. The current Windows run is recorded in
+[WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md).
 
 The History application builds and runs on this physical Apple Silicon Mac
 with the pinned Alicorn runtime and SDL 3.4.16. The native Metal, Retina,
@@ -164,7 +171,7 @@ Git results and otherwise entered the host’s event wait path. Logical window
 coordinates remain separate from the 2x physical Metal drawable; the app’s
 layout, scroll, and input model stays logical.
 
-## Unverified areas
+## Areas not covered by the historical capture
 
 ```text
 real macOS IME preedit/candidate/commit session: not manually exercised
@@ -181,9 +188,8 @@ summary, but repeated independent runs, an LLDB run, selected-commit runs, and
 the final diagnostics capture all completed successfully. It is recorded as a
 transient/unreproduced probe result, not as a claimed application failure.
 
-## Recommendation
+## Historical recommendation (superseded)
 
-**REVISE** — the macOS native foundation and History rendering/data path are
-working on this machine, and the concrete app hierarchy bug is fixed. Complete
-the short manual interaction/resize/IME pass and a longer soak before calling
-Windows + macOS dogfood fully closed.
+The earlier capture recommended another manual interaction/resize/IME pass
+and a longer soak. That recommendation predates the maintainer's subsequent
+macOS verification. Windows native validation is documented separately.
