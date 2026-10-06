@@ -47,6 +47,21 @@ history_test_make_ref :: proc(full_name, short_name, object_id, target_commit_id
 	return ref
 }
 
+history_test_find_commit_row :: proc(rt: ^alicorn.Runtime, row_column: ^alicorn.Node) -> ^alicorn.Node {
+	if rt == nil || row_column == nil { return nil }
+	expected := alicorn.visual_part_identity_hash(
+		alicorn.visual_part_extension_id("app.history", "commit-row"),
+	)
+	for id in row_column.children {
+		node, found := rt.nodes[id]
+		part, tagged := rt.visual_parts[id]
+		if found && tagged && node.kind == .Button && alicorn.visual_part_identity_hash(part.identity) == expected {
+			return node
+		}
+	}
+	return nil
+}
+
 history_test_refs_parser :: proc(failures: ^int) {
 	commit_oid := "1111111111111111111111111111111111111111"
 	other_commit_oid := "2222222222222222222222222222222222222222"
@@ -423,12 +438,7 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 		row_column: ^alicorn.Node = nil
 		for _, node in rt.nodes { if node.label == "history-commit-rows" { row_column = node } }
 		if row_column != nil && len(graph.surface_circles) > 0 && len(app.visible) > 0 {
-			first_commit := app.commits[app.visible[0]]
-			first_label := fmt.tprintf("%s  %s", commit_short_id(first_commit), first_commit.subject)
-			first_row: ^alicorn.Node = nil
-			for _, node in rt.nodes {
-				if node.kind == .Button && node.label == first_label { first_row = node; break }
-			}
+			first_row := history_test_find_commit_row(&rt, row_column)
 			if first_row != nil {
 				marker_y := graph.bounds.y + graph.surface_circles[0].center.y
 				row_y := first_row.bounds.y + first_row.bounds.h*0.5
@@ -448,12 +458,9 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 	if alicorn.scroll_region_set_offset(&rt, app.history_scroll_node, 17, "DAG fractional alignment test") {
 		_ = history_build(rawptr(app), &rt, 1200, 800, 2)
 		if graph, ok := rt.nodes[app.commit_graph_node]; ok && len(graph.surface_circles) > 0 {
-			first_commit := app.commits[app.visible[0]]
-			first_label := fmt.tprintf("%s  %s", commit_short_id(first_commit), first_commit.subject)
-			first_row: ^alicorn.Node = nil
-			for _, node in rt.nodes {
-				if node.kind == .Button && node.label == first_label { first_row = node; break }
-			}
+			row_column: ^alicorn.Node = nil
+			for _, node in rt.nodes { if node.label == "history-commit-rows" { row_column = node } }
+			first_row := history_test_find_commit_row(&rt, row_column)
 			if first_row != nil {
 				marker_y := graph.bounds.y + graph.surface_circles[0].center.y
 				row_y := first_row.bounds.y + first_row.bounds.h*0.5
@@ -485,6 +492,16 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 	} else {
 		history_test_expect(failures, false, "three-pane refs/history/detail layout is retained")
 	}
+	ref_badge_identity := alicorn.visual_part_identity_hash(alicorn.visual_part_extension_id("app.history", "ref-badge"))
+	commit_row_identity := alicorn.visual_part_identity_hash(alicorn.visual_part_extension_id("app.history", "commit-row"))
+	ref_badge_found, commit_row_found := false, false
+	for id, part in rt.visual_parts {
+		identity := alicorn.visual_part_identity_hash(part.identity)
+		if identity == ref_badge_identity { ref_badge_found = true }
+		if identity == commit_row_identity { commit_row_found = true }
+	}
+	history_test_expect(failures, ref_badge_found && commit_row_found,
+		"History describes its Ref_Badge and Commit_Row with app-defined visual-part identities")
 	history_test_expect(failures, app.refs_scroll_node != 0, "refs sidebar uses a retained scroll region")
 	if refs := alicorn.scroll_region_state(&rt, app.refs_scroll_node); app.refs_scroll_node != 0 {
 		history_test_expect(failures, refs.viewport_height > 0, "refs sidebar has a visible viewport")

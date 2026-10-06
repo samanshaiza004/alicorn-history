@@ -23,6 +23,15 @@ history_ref_heading :: proc(kind: Git_Ref_Kind) -> (label, key: string) {
 	return "", "history-refs-heading-unknown"
 }
 
+history_ref_badge_text :: proc(kind: Git_Ref_Kind) -> string {
+	#partial switch kind {
+	case .Branch: return "BRANCH"
+	case .Remote: return "REMOTE"
+	case .Tag:    return "TAG"
+	}
+	return "REF"
+}
+
 history_file_status_text :: proc(status: File_Status) -> string {
 	#partial switch status {
 	case .Modified: return "M"
@@ -181,13 +190,37 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		label := ref.short_name
 		if ref.is_head { label = fmt.tprintf("%s  (HEAD)", ref.short_name) }
 		selected := app.has_selection && len(ref.target_commit_id) > 0 && app.selected_id == ref.target_commit_id
-		clicked := alicorn.button(
+		ref_button, clicked := alicorn.button_begin(
 			&ui,
-			label,
+			"",
+			key=alicorn.key_string("ref-row-button"),
 			state=alicorn.Button_State{selected=selected, disabled=len(ref.target_commit_id) == 0},
-			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT, padding=4),
+			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT, padding=0),
+			content_style=alicorn.button_content_style(.Start, padding_x=4, padding_y=2),
 			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis},
 		)
+		_ = alicorn.visual_part_attach(&ui, ref_button, ref_button,
+			alicorn.visual_part_extension_id("app.history", "ref-row"))
+		alicorn.container_begin(&ui, .Container, label="history-ref-content",
+			key=alicorn.key_string("ref-content"),
+			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT-4, grow=1, gap=6, align=.Center, clip=true))
+		badge := alicorn.container_begin(&ui, .Container, label="history-ref-badge",
+			key=alicorn.key_string("ref-badge"),
+			style=alicorn.layout_style(.Row, width=58, height=18, padding=2, align=.Center, clip=true),
+			color=HEADER_BG)
+		_ = alicorn.visual_part_attach(&ui, badge, ref_button,
+			alicorn.visual_part_extension_id("app.history", "ref-badge"))
+		alicorn.text(&ui, history_ref_badge_text(ref.kind),
+			key=alicorn.key_string("ref-kind-label"),
+			style=alicorn.layout_style(.Row, height=14),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+		alicorn.text(&ui, label,
+			key=alicorn.key_string("ref-name-label"),
+			style=alicorn.layout_style(.Row, grow=1, height=HISTORY_REF_ROW_HEIGHT-4),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+		alicorn.button_end(&ui)
 		if clicked {
 			found, changed, filter_changed, visible_position := history_select_ref(app, row.ref_index)
 			if found {
@@ -229,7 +262,6 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		app.commit_graph_node = alicorn.gpu_geometry_surface(
 			&ui,
 			"history-commit-dag",
-			0,
 			alicorn.layout_style(.Row, width=dag_gutter_width, height=viewport_height, clip=true),
 			dpi_scale,
 		)
@@ -242,7 +274,29 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		label := fmt.tprintf("%s  %s", commit_short_id(commit), commit.subject)
 		row_weight := alicorn.FONT_WEIGHT_REGULAR
 		if selected { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
-		clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected}, style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=4), text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
+		commit_row, clicked := alicorn.button_begin(
+			&ui,
+			"",
+			key=alicorn.key_string("commit-row-button"),
+			state=alicorn.Button_State{selected=selected},
+			style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=0),
+			content_style=alicorn.button_content_style(.Start, padding_x=4, padding_y=4),
+		)
+		_ = alicorn.visual_part_attach(&ui, commit_row, commit_row,
+			alicorn.visual_part_extension_id("app.history", "commit-row"))
+		alicorn.container_begin(&ui, .Container, label="history-commit-row-content",
+			key=alicorn.key_string("commit-row-content"),
+			style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT-8, grow=1, gap=10, align=.Center, clip=true))
+		alicorn.text(&ui, commit_short_id(commit),
+			key=alicorn.key_string("commit-short-id"),
+			style=alicorn.layout_style(.Row, width=68, height=HISTORY_COMMIT_ROW_HEIGHT-8),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis})
+		alicorn.text(&ui, commit.subject,
+			key=alicorn.key_string("commit-subject"),
+			style=alicorn.layout_style(.Row, grow=1, height=HISTORY_COMMIT_ROW_HEIGHT-8),
+			text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+		alicorn.button_end(&ui)
 		if clicked {
 			history_select_visible_index(app, position)
 			selection_changed = true
@@ -385,7 +439,13 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			)
 			app.graph_geometry_revision += 1
 			if app.graph_geometry_revision == 0 { app.graph_geometry_revision = 1 }
-			if alicorn.gpu_surface_update_geometry(rt, app.commit_graph_node, app.graph_geometry_revision, app.graph_segments[:], app.graph_circles[:]) {
+			if alicorn.gpu_surface_update_geometry_versioned(
+				rt,
+				app.commit_graph_node,
+				alicorn.GPU_Surface_Update_Revision(app.graph_geometry_revision),
+				app.graph_segments[:],
+				app.graph_circles[:],
+			) {
 				app.graph_geometry_key = key
 			}
 		}
