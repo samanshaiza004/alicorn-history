@@ -9,12 +9,17 @@ PANEL_BG   :: alicorn.Color{0.055, 0.075, 0.115, 1}
 HEADER_BG  :: alicorn.Color{0.08, 0.13, 0.22, 1}
 ROW_BG     :: alicorn.Color{0.10, 0.17, 0.28, 1}
 SELECT_BG  :: alicorn.Color{0.18, 0.35, 0.56, 1}
+HISTORY_PATCH_GUTTER_BG :: alicorn.Color{0.035, 0.05, 0.075, 1}
 
 HISTORY_COMMIT_ROW_HEIGHT :: f32(44)
 HISTORY_FILE_ROW_HEIGHT   :: f32(32)
 HISTORY_PATCH_LINE_HEIGHT :: f32(22)
 HISTORY_REF_ROW_HEIGHT    :: f32(24)
 HISTORY_FILE_LIST_HEIGHT  :: f32(104)
+HISTORY_PATCH_OLD_GUTTER_WIDTH :: f32(56)
+HISTORY_PATCH_NEW_GUTTER_WIDTH :: f32(56)
+HISTORY_PATCH_MARKER_WIDTH :: f32(24)
+HISTORY_PATCH_GUTTER_WIDTH :: HISTORY_PATCH_OLD_GUTTER_WIDTH + HISTORY_PATCH_NEW_GUTTER_WIDTH + HISTORY_PATCH_MARKER_WIDTH
 HISTORY_ROOT_PADDING :: f32(12)
 HISTORY_WORKSPACE_DIVIDER_WIDTH :: f32(2)
 HISTORY_DETAIL_MIN_WIDTH :: f32(280)
@@ -176,12 +181,12 @@ history_patch_display_line :: proc(patch: File_Patch, index: int) -> (line: Patc
 		if position == index { return Patch_Display_Line{kind=.Meta, text=metadata}, true }
 		position += 1
 	}
-	for hunk in patch.hunks {
-		if position == index { return Patch_Display_Line{kind=.Meta, text=hunk.header, hunk=true}, true }
+	for hunk, hunk_index in patch.hunks {
+		if position == index { return Patch_Display_Line{kind=.Meta, text=hunk.header, hunk=true, hunk_index=hunk_index}, true }
 		position += 1
 		for patch_line in hunk.lines {
 			if position == index {
-				return Patch_Display_Line{kind=patch_line.kind, old_line=patch_line.old_line, new_line=patch_line.new_line, text=patch_line.text}, true
+				return Patch_Display_Line{kind=patch_line.kind, old_line=patch_line.old_line, new_line=patch_line.new_line, text=patch_line.text, hunk_index=hunk_index}, true
 			}
 			position += 1
 		}
@@ -190,6 +195,16 @@ history_patch_display_line :: proc(patch: File_Patch, index: int) -> (line: Patc
 		return Patch_Display_Line{kind=.Meta, text="Binary file changed"}, true
 	}
 	return
+}
+
+history_patch_hunk_display_index :: proc(patch: File_Patch, hunk_index: int) -> int {
+	if hunk_index < 0 || hunk_index >= len(patch.hunks) { return -1 }
+	display_index := len(patch.metadata)
+	for hunk, index in patch.hunks {
+		if index == hunk_index { return display_index }
+		display_index += 1 + len(hunk.lines)
+	}
+	return -1
 }
 
 history_patch_content_width :: proc(patch: File_Patch) -> f32 {
@@ -214,6 +229,14 @@ history_diff_line_color :: proc(kind: Diff_Line_Kind) -> alicorn.Color {
 	return alicorn.NO_BACKGROUND_COLOR
 }
 
+history_diff_gutter_color :: proc(kind: Diff_Line_Kind) -> alicorn.Color {
+	#partial switch kind {
+	case .Addition: return alicorn.Color{0.50, 0.82, 0.64, 1}
+	case .Deletion: return alicorn.Color{0.90, 0.58, 0.60, 1}
+	}
+	return alicorn.Color{0.58, 0.64, 0.73, 1}
+}
+
 history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logical_height: int, dpi_scale: f32) -> alicorn.Node_ID {
 	app := cast(^History_App)state
 	ui, should_build := alicorn.begin_frame(rt)
@@ -226,6 +249,9 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	refs_selection_position := -1
 	commit_graph_first := 0
 	commit_graph_last := 0
+	patch_hunk_scroll_node := alicorn.Node_ID(0)
+	patch_hunk_scroll_target := -1
+	patch_hunk_changed := false
 
 	root_style := alicorn.layout_style(padding=HISTORY_ROOT_PADDING, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
@@ -512,6 +538,40 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			} else if app.patch.path == app.selected_file_path && (len(app.patch.hunks) > 0 || app.patch.binary || len(app.patch.metadata) > 0) {
 				patch_content_width := history_patch_content_width(app.patch)
 				patch_line_count := history_patch_display_count(app.patch)
+				hunk_count := len(app.patch.hunks)
+				if hunk_count > 0 {
+					if app.selected_patch_hunk >= hunk_count { app.selected_patch_hunk = hunk_count-1 }
+					alicorn.container_begin(&ui, .Container, label="history-patch-hunk-navigation", style=alicorn.layout_style(.Row, height=30, gap=8, align=.Center))
+					_, previous_hunk_clicked := alicorn.button_begin(
+						&ui,
+						"‹ Previous",
+						key=alicorn.key_string("history-patch-previous-hunk"),
+						state=alicorn.Button_State{disabled=app.selected_patch_hunk <= 0},
+						style=alicorn.layout_style(.Row, width=84, height=28),
+					)
+					alicorn.button_end(&ui)
+					if previous_hunk_clicked && app.selected_patch_hunk > 0 {
+						app.selected_patch_hunk -= 1
+						patch_hunk_changed = true
+					}
+					alicorn.text(&ui, fmt.tprintf("Hunk %d / %d", app.selected_patch_hunk+1, hunk_count), style=alicorn.layout_style(.Row, height=26, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+					_, next_hunk_clicked := alicorn.button_begin(
+						&ui,
+						"Next ›",
+						key=alicorn.key_string("history-patch-next-hunk"),
+						state=alicorn.Button_State{disabled=app.selected_patch_hunk+1 >= hunk_count},
+						style=alicorn.layout_style(.Row, width=84, height=28),
+					)
+					alicorn.button_end(&ui)
+					if next_hunk_clicked && app.selected_patch_hunk+1 < hunk_count {
+						app.selected_patch_hunk += 1
+						patch_hunk_changed = true
+					}
+					alicorn.container_end(&ui)
+					if patch_hunk_changed {
+						patch_hunk_scroll_target = history_patch_hunk_display_index(app.patch, app.selected_patch_hunk)
+					}
+				}
 				patch_list := alicorn.virtual_list_begin(
 					&ui,
 					patch_line_count,
@@ -524,13 +584,15 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					axes=.Both,
 					axis_behavior=.Auto_Lock,
 				)
+				patch_hunk_scroll_node = patch_list.scroll.id
 				for position := patch_list.first; position < patch_list.last; position += 1 {
 					line, line_ok := history_patch_display_line(app.patch, position)
 					if !line_ok { continue }
 					color := history_diff_line_color(line.kind)
-					alicorn.container_begin(&ui, .Container, label="patch-line", key=alicorn.key_u64(u64(position)), style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=2), color=color)
+					if line.hunk && line.hunk_index == app.selected_patch_hunk { color = SELECT_BG }
+					alicorn.container_begin(&ui, .Container, label="patch-line", key=alicorn.key_u64(u64(position)), style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT), color=color)
 					if line.hunk {
-						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=6))
+						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=6), font=alicorn.Font_Role.Monospace, text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Clip})
 					} else {
 						old_text := ""
 						new_text := ""
@@ -539,10 +601,24 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 						marker := " "
 						if line.kind == .Addition { marker = "+" }
 						if line.kind == .Deletion { marker = "-" }
-						alicorn.text(&ui, old_text, style=alicorn.layout_style(.Row, width=58, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End))
-						alicorn.text(&ui, new_text, style=alicorn.layout_style(.Row, width=58, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End))
-						alicorn.text(&ui, marker, style=alicorn.layout_style(.Row, width=22, height=HISTORY_PATCH_LINE_HEIGHT, padding=2, align=.Center))
-						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=patch_content_width-138, height=HISTORY_PATCH_LINE_HEIGHT))
+						alicorn.container_begin(&ui, .Container, label="patch-line-number-gutter", style=alicorn.layout_style(.Row, width=HISTORY_PATCH_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT), color=HISTORY_PATCH_GUTTER_BG)
+						gutter_text_style := alicorn.Text_Style{overflow=.Clip}
+						old_number_id := alicorn.text(&ui, old_text, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_OLD_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
+						if len(old_text) > 0 {
+							span := [1]alicorn.Text_Paint_Span{{start=0, end=len(old_text), color=history_diff_gutter_color(line.kind), color_set=true}}
+							_ = alicorn.text_paint_spans(&ui, old_number_id, span[:])
+						}
+						new_number_id := alicorn.text(&ui, new_text, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_NEW_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
+						if len(new_text) > 0 {
+							span := [1]alicorn.Text_Paint_Span{{start=0, end=len(new_text), color=history_diff_gutter_color(line.kind), color_set=true}}
+							_ = alicorn.text_paint_spans(&ui, new_number_id, span[:])
+						}
+					marker_id := alicorn.text(&ui, marker, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_MARKER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=2, align=.Center), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
+					marker_span := [1]alicorn.Text_Paint_Span{{start=0, end=len(marker), color=history_diff_gutter_color(line.kind), color_set=true}}
+					_ = alicorn.text_paint_spans(&ui, marker_id, marker_span[:])
+						alicorn.container_end(&ui)
+						code_width := max(0, patch_content_width-HISTORY_PATCH_GUTTER_WIDTH)
+						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=code_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=4), font=alicorn.Font_Role.Monospace, text_style=alicorn.Text_Style{overflow=.Clip})
 					}
 					alicorn.container_end(&ui)
 				}
@@ -620,6 +696,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	if refs_selection_position >= 0 {
 		_ = alicorn.virtual_list_ensure_visible(rt, app.history_scroll_node, refs_selection_position, "ref target commit visibility")
+	}
+	if patch_hunk_changed {
+		alicorn.invalidate_root(rt, "history patch hunk changed")
+		if patch_hunk_scroll_node != 0 && patch_hunk_scroll_target >= 0 {
+			_ = alicorn.virtual_list_ensure_visible(rt, patch_hunk_scroll_node, patch_hunk_scroll_target, "history hunk navigation")
+		}
 	}
 	_ = dpi_scale
 	_ = logical_width

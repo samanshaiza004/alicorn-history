@@ -65,8 +65,8 @@ run Windows CI.
 - ref navigation that selects the target commit and reveals it in the history list;
 - deterministic first-parent unified patches from Git;
 - structured hunk/line parsing with binary and mode-change fallbacks;
-- virtualized, no-wrap diff rows with fixed line-number gutters and retained
-  horizontal scrolling;
+- virtualized, no-wrap diff rows with monospaced, shaded line-number gutters,
+  retained horizontal scrolling, and previous/next hunk navigation;
 - independent latest-wins history and detail request lanes;
 - an independent latest-wins patch request lane;
 - first-parent semantics for merge commit details;

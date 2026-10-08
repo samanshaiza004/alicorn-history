@@ -42,6 +42,7 @@ History_App :: struct {
 	detail_error:        string,
 	selected_file_index: int,
 	selected_file_path:  string,
+	selected_patch_hunk: int,
 	patch:               File_Patch,
 	patch_loading:       bool,
 	patch_error:         string,
@@ -180,6 +181,7 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 
 history_reset_patch_storage :: proc(app: ^History_App) {
 	file_patch_destroy(&app.patch)
+	app.selected_patch_hunk = 0
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = false
@@ -237,6 +239,7 @@ history_worker_submit_patch :: proc(app: ^History_App) -> bool {
 	app.next_patch_id += 1
 	app.latest_patch_id = app.next_patch_id
 	file_patch_destroy(&app.patch)
+	app.selected_patch_hunk = 0
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = true

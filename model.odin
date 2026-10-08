@@ -90,6 +90,7 @@ Patch_Display_Line :: struct {
 	new_line: int,
 	text:     string,
 	hunk:     bool,
+	hunk_index: int,
 }
 
 history_patch_prepare_display :: proc(patch: ^File_Patch) {
@@ -102,11 +103,11 @@ history_patch_prepare_display :: proc(patch: ^File_Patch) {
 		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text=metadata})
 		width = max(width, f32(len(metadata))*8 + 24)
 	}
-	for hunk in patch.hunks {
-		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text=hunk.header, hunk=true})
+	for hunk, hunk_index in patch.hunks {
+		append(&patch.display_lines, Patch_Display_Line{kind=.Meta, text=hunk.header, hunk=true, hunk_index=hunk_index})
 		width = max(width, f32(len(hunk.header))*8 + 24)
 		for line in hunk.lines {
-			append(&patch.display_lines, Patch_Display_Line{kind=line.kind, old_line=line.old_line, new_line=line.new_line, text=line.text})
+			append(&patch.display_lines, Patch_Display_Line{kind=line.kind, old_line=line.old_line, new_line=line.new_line, text=line.text, hunk_index=hunk_index})
 			width = max(width, f32(len(line.text))*8 + 160)
 		}
 	}
