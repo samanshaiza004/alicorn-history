@@ -2,7 +2,9 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "core:sync/chan"
 import "core:strings"
+import "core:time"
 import alicorn "vendor/alicorn/runtime"
 
 history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
@@ -342,6 +344,73 @@ history_test_large_patch :: proc(failures: ^int) {
 	history_test_expect(failures, last_line_ok && last_line.text == "line" && last_line.new_line == 5000, "large patch display index resolves the final visible row directly")
 	file_patch_destroy(&patch)
 	if len(error_text) > 0 { delete(error_text) }
+}
+
+history_test_worker_patch_selection :: proc(failures: ^int, repository: string, commit: Commit, path: string) {
+	app := history_app_new(repository)
+	if app == nil {
+		history_test_expect(failures, false, "patch worker selection fixture allocates application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.commits = make([dynamic]Commit, 0, 1)
+	copy, copy_ok := commit_clone(commit)
+	if !copy_ok {
+		history_test_expect(failures, false, "patch worker selection fixture clones its selected commit")
+		return
+	}
+	append(&app.commits, copy)
+	app.visible = make([dynamic]int, 0, 1)
+	append(&app.visible, 0)
+	app.selected_id, _ = strings.clone(commit.id)
+	app.has_selection = true
+	app.selected_commit_index = 0
+	if !git_worker_start(&app.worker) {
+		history_test_expect(failures, false, "patch worker selection fixture starts the Git worker")
+		return
+	}
+	if !history_worker_submit_detail(app) {
+		history_test_expect(failures, false, "selected commit detail request enters the worker lane")
+		return
+	}
+
+	requested_source := false
+	patch_completed := false
+	for _ in 0..<5000 {
+		progress := false
+		for {
+			result, ok := chan.try_recv(app.worker.detail_results)
+			if !ok { break }
+			progress = true
+			accepted := history_adopt_result(app, result)
+			if accepted {
+				for file, index in app.detail.files {
+					if file.path == path {
+						app.selected_file_index = -1
+						requested_source = history_select_file_index(app, index)
+						break
+					}
+				}
+			}
+		}
+		for {
+			result, ok := chan.try_recv(app.worker.patch_results)
+			if !ok { break }
+			progress = true
+			_ = history_adopt_result(app, result)
+		}
+		if requested_source && !app.patch_loading {
+			patch_completed = app.patch.path == path && len(app.patch.hunks) > 0 && len(app.patch_error) == 0
+			break
+		}
+		if !progress { time.sleep(time.Millisecond) }
+	}
+	history_test_expect(failures, requested_source, "loaded commit details let the UI submit the selected source file patch")
+	history_test_expect(failures, patch_completed,
+		"latest-wins worker selection delivers and adopts textual hunks for the selected source file")
 }
 
 history_test_ref_selection_visibility :: proc(failures: ^int) {
@@ -756,6 +825,7 @@ history_run_tests :: proc(repository: string) -> bool {
 					history_test_expect(&failures, patch.path == file.path, "changed Odin source patch retains the selected file identity")
 					file_patch_destroy(&patch)
 					if len(patch_error) > 0 { delete(patch_error) }
+					history_test_worker_patch_selection(&failures, repository, real_commits[i], file.path)
 					source_patch_tested = true
 				}
 			}
