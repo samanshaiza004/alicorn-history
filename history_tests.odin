@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:sync/chan"
 import "core:strings"
 import "core:time"
@@ -712,6 +713,15 @@ history_test_clean_object_id :: proc(value: string) -> bool {
 
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
+	subdirectory := fmt.tprintf("%s/out", repository)
+	if os.is_dir(subdirectory) {
+		subdirectory_root := history_absolute_repository(subdirectory)
+		repository_root := history_absolute_repository(repository)
+		history_test_expect(&failures, len(subdirectory_root) > 0 && subdirectory_root == repository_root,
+			"launching from a repository subdirectory resolves Git's worktree root")
+		if len(subdirectory_root) > 0 { delete(subdirectory_root) }
+		if len(repository_root) > 0 { delete(repository_root) }
+	}
 	data := make([dynamic]u8, 0, 160)
 	append(&data, "abc\x00parent\x00Ada\x00ada@example.com\x001700000000\x00first commit\x00\x00")
 	append(&data, "def\x00\x00Grace\x00grace@example.com\x001700000001\x00second commit\x00\x00")

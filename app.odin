@@ -68,10 +68,17 @@ history_app_new :: proc(repository: string) -> ^History_App {
 
 history_absolute_repository :: proc(repository: string) -> string {
 	absolute, err := filepath.abs(repository)
-	if err == nil { return absolute }
-	copy, clone_err := strings.clone(repository)
-	if clone_err != nil { return "" }
-	return copy
+	if err != nil {
+		copy, clone_err := strings.clone(repository)
+		if clone_err != nil { return "" }
+		return copy
+	}
+	root := git_repository_root(absolute)
+	if len(root) > 0 {
+		delete(absolute)
+		return root
+	}
+	return absolute
 }
 
 history_app_destroy :: proc(app: ^History_App) {

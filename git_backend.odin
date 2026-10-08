@@ -25,6 +25,21 @@ git_run :: proc(repository: string, args: []string) -> (stdout, stderr: []byte, 
 	return
 }
 
+git_repository_root :: proc(repository: string) -> string {
+	stdout, stderr, _, ok := git_run(repository, []string{"rev-parse", "--show-toplevel"})
+	defer {
+		if len(stdout) > 0 { delete(stdout) }
+		if len(stderr) > 0 { delete(stderr) }
+	}
+	if !ok { return "" }
+	end := len(stdout)
+	for end > 0 && (stdout[end-1] == '\n' || stdout[end-1] == '\r') { end -= 1 }
+	if end == 0 { return "" }
+	root, err := strings.clone(string(stdout[:end]))
+	if err != nil { return "" }
+	return root
+}
+
 git_repository_branch :: proc(repository: string) -> string {
 	stdout, stderr, _, ok := git_run(repository, []string{"branch", "--show-current"})
 	defer { if len(stderr) > 0 { delete(stderr) } }
