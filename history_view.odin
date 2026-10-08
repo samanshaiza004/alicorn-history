@@ -19,6 +19,9 @@ HISTORY_ROOT_PADDING :: f32(12)
 HISTORY_WORKSPACE_DIVIDER_WIDTH :: f32(2)
 HISTORY_DETAIL_MIN_WIDTH :: f32(280)
 HISTORY_METADATA_WIDE_MIN_WIDTH :: f32(380)
+HISTORY_METADATA_ROW_HEIGHT :: f32(26)
+HISTORY_METADATA_ROW_GAP :: f32(4)
+HISTORY_METADATA_GRID_HEIGHT :: f32(4*HISTORY_METADATA_ROW_HEIGHT + 3*HISTORY_METADATA_ROW_GAP)
 
 History_Commit_Metadata_Presentation :: enum { Wide, Compact }
 
@@ -51,25 +54,31 @@ history_build_commit_metadata :: proc(ui_value: alicorn.UI, app: ^History_App, c
 	if app.detail.id == app.selected_id && len(app.detail.subject) > 0 { message = app.detail.subject }
 	if presentation == .Wide {
 		property_columns := [2]alicorn.Grid_Track{alicorn.grid_fixed(76), alicorn.grid_fraction(1)}
-		property_rows := [4]alicorn.Grid_Track{alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto()}
+		property_rows := [4]alicorn.Grid_Track{
+			alicorn.grid_fixed(HISTORY_METADATA_ROW_HEIGHT),
+			alicorn.grid_fixed(HISTORY_METADATA_ROW_HEIGHT),
+			alicorn.grid_fixed(HISTORY_METADATA_ROW_HEIGHT),
+			alicorn.grid_fixed(HISTORY_METADATA_ROW_HEIGHT),
+		}
 		alicorn.grid_begin(&ui, alicorn.key_string("history-commit-properties-wide-grid"), property_columns[:], property_rows[:],
-			style=alicorn.layout_style(width=-1, height=alicorn.LAYOUT_SIZE_FIT_CONTENT), gap_x=8, gap_y=4,
+			style=alicorn.layout_style(width=-1, height=HISTORY_METADATA_GRID_HEIGHT), gap_x=8, gap_y=HISTORY_METADATA_ROW_GAP,
 			label="history-commit-properties-wide-grid")
-		author_label := alicorn.text(&ui, "Author", key=alicorn.key_string("history-property-author-label"))
+		metadata_text_style := alicorn.Text_Style{overflow=.Ellipsis}
+		author_label := alicorn.text(&ui, "Author", key=alicorn.key_string("history-property-author-label"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, author_label, 0, 0, align_y=.Baseline)
-		author_value := alicorn.text(&ui, fmt.tprintf("%s <%s>", commit.author_name, commit.author_email), key=alicorn.key_string("history-property-author-value"))
+		author_value := alicorn.text(&ui, fmt.tprintf("%s <%s>", commit.author_name, commit.author_email), key=alicorn.key_string("history-property-author-value"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, author_value, 0, 1, align_y=.Baseline)
-		commit_label := alicorn.text(&ui, "Commit", key=alicorn.key_string("history-property-commit-label"))
+		commit_label := alicorn.text(&ui, "Commit", key=alicorn.key_string("history-property-commit-label"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, commit_label, 1, 0, align_y=.Baseline)
-		commit_value := alicorn.text(&ui, commit_short_id(commit), key=alicorn.key_string("history-property-commit-value"))
+		commit_value := alicorn.text(&ui, commit_short_id(commit), key=alicorn.key_string("history-property-commit-value"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, commit_value, 1, 1, align_y=.Baseline)
-		branch_label := alicorn.text(&ui, "Branch", key=alicorn.key_string("history-property-branch-label"))
+		branch_label := alicorn.text(&ui, "Branch", key=alicorn.key_string("history-property-branch-label"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, branch_label, 2, 0, align_y=.Baseline)
-		branch_value := alicorn.text(&ui, app.branch, key=alicorn.key_string("history-property-branch-value"))
+		branch_value := alicorn.text(&ui, app.branch, key=alicorn.key_string("history-property-branch-value"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, branch_value, 2, 1, align_y=.Baseline)
-		message_label := alicorn.text(&ui, "Message", key=alicorn.key_string("history-property-message-label"))
+		message_label := alicorn.text(&ui, "Message", key=alicorn.key_string("history-property-message-label"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, message_label, 3, 0, align_y=.Baseline)
-		message_value := alicorn.text(&ui, message, key=alicorn.key_string("history-property-message-value"))
+		message_value := alicorn.text(&ui, message, key=alicorn.key_string("history-property-message-value"), text_style=metadata_text_style)
 		_ = alicorn.grid_cell(&ui, message_value, 3, 1, align_y=.Baseline)
 		alicorn.grid_end(&ui)
 	} else {
@@ -97,11 +106,11 @@ history_build_commit_metadata :: proc(ui_value: alicorn.UI, app: ^History_App, c
 		alicorn.container_begin(&ui, .Container,
 			label="history-commit-properties-branch-chip",
 			key=alicorn.key_string("history-commit-properties-branch-chip"),
-			style=alicorn.layout_style(.Row, width=alicorn.LAYOUT_SIZE_FIT_CONTENT, height=20, padding=6, align=.Center),
+			style=alicorn.layout_style(.Row, width=-1, height=28, padding=3, align=.Center),
 			color=HEADER_BG)
 		alicorn.text(&ui, app.branch,
 			key=alicorn.key_string("history-property-branch-value"),
-			style=alicorn.layout_style(.Row, height=18),
+			style=alicorn.layout_style(.Row, height=22, grow=1),
 			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis})
 		alicorn.container_end(&ui)
 		alicorn.container_end(&ui)

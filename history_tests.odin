@@ -8,6 +8,8 @@ import "core:strings"
 import "core:time"
 import alicorn "vendor/alicorn/runtime"
 
+HISTORY_TEST_FONT :: #load("vendor/alicorn/assets/fonts/AtkinsonHyperlegibleNext-Variable.ttf")
+
 history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
 	if !condition {
 		failures^ += 1
@@ -620,6 +622,13 @@ history_test_find_text_node :: proc(rt: ^alicorn.Runtime, value: string) -> alic
 	return 0
 }
 
+history_test_single_line_text_fits :: proc(rt: ^alicorn.Runtime, id: alicorn.Node_ID) -> bool {
+	if rt == nil || id == 0 { return false }
+	node, ok := rt.nodes[id]
+	if !ok || node == nil || !node.text_run_valid || len(node.text_run.lines) != 1 { return false }
+	return node.text_run.width <= node.bounds.w+1 && node.text_run.height <= node.bounds.h+1
+}
+
 history_test_find_text_with_ancestor :: proc(rt: ^alicorn.Runtime, value: string, ancestor: alicorn.Node_ID) -> alicorn.Node_ID {
 	if rt == nil || ancestor == 0 { return 0 }
 	for id, node in rt.nodes {
@@ -664,7 +673,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 		history_app_destroy(app)
 		free(app)
 	}
-	app.branch, _ = strings.clone("feature/responsive-grid-layout")
+	app.branch, _ = strings.clone("feature/responsive-grid-layout/with/a-deliberately-long-reference-name")
 	app.loading = false
 	app.commits = make([dynamic]Commit, 0, 1)
 	commit := Commit{}
@@ -702,7 +711,13 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 
 	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
 	defer alicorn.destroy_runtime(&rt)
+	font_loaded := alicorn.text_engine_load_font(&rt.text_engine, HISTORY_TEST_FONT)
+	history_test_expect(failures, font_loaded, "adaptive metadata fixture loads its text measurement font")
 	widths := [4]int{1200, 1200, 1050, 1200}
+	wide_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 722)) == .Wide
+	compact_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 850)) == .Compact
+	history_test_expect(failures, wide_split_mode && compact_split_mode,
+		"metadata presentation follows changed Split allocation at a stable window width")
 	metadata_owner := alicorn.Node_ID(0)
 	focus_id := alicorn.Node_ID(0)
 	wide_metadata_bounds := alicorn.Rect{}
@@ -737,13 +752,36 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 		grid_ok := presentation == .Wide && grid_id != 0
 		if grid_ok {
 			grid := rt.nodes[grid_id]
-			max_bottom := grid.bounds.y
-			for _, node in rt.nodes {
-				if node.parent == grid_id && node.bounds.y+node.bounds.h > max_bottom {
-					max_bottom = node.bounds.y+node.bounds.h
-				}
+			metadata := rt.nodes[metadata_id]
+			detail_heading_id := history_test_find_text_node(&rt, "Changed files (2)")
+			detail_heading_ok := detail_heading_id != 0 && rt.nodes[detail_heading_id].bounds.y >= metadata.bounds.y+metadata.bounds.h-1
+			grid_ok = grid_ok && detail_heading_ok
+			author_text := fmt.tprintf("%s <%s>", commit.author_name, commit.author_email)
+			row_labels := [4]string{"Author", "Commit", "Branch", "Message"}
+			row_values := [4]string{author_text, commit_short_id(commit), app.branch, app.detail.subject}
+			previous_bottom := grid.bounds.y
+			grid_ok = grid.bounds.w > 0 && grid.bounds.h >= HISTORY_METADATA_GRID_HEIGHT-1
+			for row in 0..<len(row_labels) {
+				label_id := history_test_find_text_node(&rt, row_labels[row])
+				value_id := history_test_find_text_node(&rt, row_values[row])
+				if label_id == 0 || value_id == 0 { grid_ok = false; continue }
+				label, value := rt.nodes[label_id], rt.nodes[value_id]
+				row_top := label.bounds.y
+				if value.bounds.y < row_top { row_top = value.bounds.y }
+				row_bottom := label.bounds.y+label.bounds.h
+				value_bottom := value.bounds.y+value.bounds.h
+				if value_bottom > row_bottom { row_bottom = value_bottom }
+				cells_ok := int(label.grid_row) == row && int(value.grid_row) == row &&
+					int(label.grid_column) == 0 && int(value.grid_column) == 1 &&
+					label.bounds.x >= grid.bounds.x && value.bounds.x >= label.bounds.x+label.bounds.w-1 &&
+					label.bounds.x+label.bounds.w <= grid.bounds.x+grid.bounds.w+1 &&
+					value.bounds.x+value.bounds.w <= grid.bounds.x+grid.bounds.w+1 &&
+					row_top >= grid.bounds.y && row_bottom <= grid.bounds.y+grid.bounds.h+1 &&
+					history_test_single_line_text_fits(&rt, label_id) && history_test_single_line_text_fits(&rt, value_id)
+				if row > 0 && row_top < previous_bottom { cells_ok = false }
+				grid_ok = grid_ok && cells_ok
+				previous_bottom = row_bottom
 			}
-			grid_ok = grid.bounds.w > 0 && grid.bounds.h > 0 && max_bottom <= grid.bounds.y+grid.bounds.h+1
 		}
 		compact_ok := presentation == .Compact && compact_id != 0
 		if compact_ok {
@@ -751,15 +789,23 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			author_id := history_test_find_text_with_ancestor(&rt, "Alexandra Example With A Deliberately Long Author Display Name", compact_id)
 			commit_id := history_test_find_text_with_ancestor(&rt, "c6a9a556", compact_id)
 			message_id := history_test_find_text_with_ancestor(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible", compact_id)
-			branch_id := history_test_find_text_with_ancestor(&rt, "feature/responsive-grid-layout", compact_id)
+			branch_id := history_test_find_text_with_ancestor(&rt, app.branch, compact_id)
 			compact_ok = author_id != 0 && commit_id != 0 && message_id != 0 && branch_id != 0
 			if compact_ok {
 				author, commit_text := rt.nodes[author_id], rt.nodes[commit_id]
 				message, branch := rt.nodes[message_id], rt.nodes[branch_id]
+				branch_chip_id := alicorn.Node_ID(0)
+				for id, node in rt.nodes {
+					if node.label == "history-commit-properties-branch-chip" { branch_chip_id = id; break }
+				}
+				branch_chip := rt.nodes[branch_chip_id]
 				compact_ok = compact.bounds.w > 0 && compact.bounds.h > 0 &&
 					author.bounds.x < commit_text.bounds.x && author.bounds.w > 0 && commit_text.bounds.w > 0 &&
 					message.bounds.y >= compact.bounds.y && message.bounds.y+message.bounds.h <= compact.bounds.y+compact.bounds.h+1 &&
-					branch.bounds.y >= compact.bounds.y && branch.bounds.y+branch.bounds.h <= compact.bounds.y+compact.bounds.h+1
+					branch.bounds.y >= compact.bounds.y && branch.bounds.y+branch.bounds.h <= compact.bounds.y+compact.bounds.h+1 &&
+					branch_chip_id != 0 && branch_chip.bounds.w >= compact.bounds.w-1 &&
+					branch.bounds.x >= branch_chip.bounds.x && branch.bounds.x+branch.bounds.w <= branch_chip.bounds.x+branch_chip.bounds.w+1 &&
+					history_test_single_line_text_fits(&rt, branch_id)
 			}
 		}
 		author_text := "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>"
