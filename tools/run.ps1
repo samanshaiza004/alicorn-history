@@ -15,8 +15,16 @@ if ([IO.Path]::IsPathRooted($Odin)) {
     $Odin = $command.Source
 }
 
+# The pinned native Alicorn host imports AccessKit on Windows. Reuse its
+# versioned bootstrap and pass an absolute library path because this script
+# runs from the History root, not from the Alicorn submodule root.
+. (Join-Path $PSScriptRoot '..\vendor\alicorn\tools\common.ps1')
+$AccessKit = Get-AlicornAccessKit
+$AccessKitLibraryDirectory = Split-Path -Parent $AccessKit.Library
+$AccessKitLinkerFlags = "/LIBPATH:$AccessKitLibraryDirectory bcrypt.lib ntdll.lib propsys.lib runtimeobject.lib uiautomationcore.lib userenv.lib ws2_32.lib"
+
 New-Item -ItemType Directory -Force -Path 'out' | Out-Null
-& $Odin build . -out:out\alicorn-history.exe
+& $Odin build . "-extra-linker-flags:$AccessKitLinkerFlags" -out:out\alicorn-history.exe
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $odinRoot = Split-Path -Parent $Odin

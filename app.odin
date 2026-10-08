@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:path/filepath"
 import "core:strings"
 import "core:sync/chan"
 import alicorn "vendor/alicorn/runtime"
@@ -41,6 +42,9 @@ History_App :: struct {
 	detail_error:        string,
 	selected_file_index: int,
 	selected_file_path:  string,
+	selected_patch_hunk: int,
+	patch_scroll_node:   alicorn.Node_ID,
+	patch_scroll_reset_pending: bool,
 	patch:               File_Patch,
 	patch_loading:       bool,
 	patch_error:         string,
@@ -56,17 +60,28 @@ History_App :: struct {
 
 history_app_new :: proc(repository: string) -> ^History_App {
 	app := new(History_App)
-	copy, err := strings.clone(repository)
-	if err != nil {
-		free(app)
-		return nil
-	}
-	app.repository = copy
+	app.repository = history_absolute_repository(repository)
+	if len(app.repository) == 0 { free(app); return nil }
 	app.selected_commit_index = -1
 	app.selected_file_index = -1
 	app.visible = make([dynamic]int, 0, 1024)
 	app.ref_rows = make([dynamic]Ref_List_Row, 0, 64)
 	return app
+}
+
+history_absolute_repository :: proc(repository: string) -> string {
+	absolute, err := filepath.abs(repository)
+	if err != nil {
+		copy, clone_err := strings.clone(repository)
+		if clone_err != nil { return "" }
+		return copy
+	}
+	root := git_repository_root(absolute)
+	if len(root) > 0 {
+		delete(absolute)
+		return root
+	}
+	return absolute
 }
 
 history_app_destroy :: proc(app: ^History_App) {
@@ -111,12 +126,8 @@ history_worker_submit_repository :: proc(app: ^History_App, repository: string) 
 	request := new(Git_Request)
 	request.history_id = app.next_history_id
 	request.kind = .Load_History
-	copy, err := strings.clone(repository)
-	if err != nil {
-		free(request)
-		return false
-	}
-	request.repository = copy
+	request.repository = history_absolute_repository(repository)
+	if len(request.repository) == 0 { free(request); return false }
 	if !git_worker_request(&app.worker, request) {
 		git_request_destroy(request)
 		return false
@@ -172,6 +183,8 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 
 history_reset_patch_storage :: proc(app: ^History_App) {
 	file_patch_destroy(&app.patch)
+	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = false
@@ -229,6 +242,8 @@ history_worker_submit_patch :: proc(app: ^History_App) -> bool {
 	app.next_patch_id += 1
 	app.latest_patch_id = app.next_patch_id
 	file_patch_destroy(&app.patch)
+	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = true
@@ -257,6 +272,8 @@ history_select_file_index :: proc(app: ^History_App, index: int) -> bool {
 	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
 	app.selected_file_path = copy
 	app.selected_file_index = index
+	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	return history_worker_submit_patch(app)
 }
 

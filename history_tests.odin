@@ -2,8 +2,13 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
+import "core:sync/chan"
 import "core:strings"
+import "core:time"
 import alicorn "vendor/alicorn/runtime"
+
+HISTORY_TEST_FONT :: #load("vendor/alicorn/assets/fonts/AtkinsonHyperlegibleNext-Variable.ttf")
 
 history_test_expect :: proc(failures: ^int, condition: bool, message: string) {
 	if !condition {
@@ -344,6 +349,176 @@ history_test_large_patch :: proc(failures: ^int) {
 	if len(error_text) > 0 { delete(error_text) }
 }
 
+history_test_patch_hunk_navigation :: proc(failures: ^int) {
+	patch := File_Patch{}
+	patch.metadata = make([dynamic]string, 0, 1)
+	append(&patch.metadata, "")
+	patch.hunks = make([dynamic]Diff_Hunk, 0, 4)
+	for _ in 0..<4 {
+		lines := make([dynamic]Diff_Line, 0, 3)
+		for _ in 0..<3 { append(&lines, Diff_Line{}) }
+		append(&patch.hunks, Diff_Hunk{header="", lines=lines})
+	}
+	history_patch_prepare_display(&patch)
+	defer file_patch_destroy(&patch)
+	history_test_expect(failures, history_patch_hunk_display_index(patch, 0) == 1 && history_patch_hunk_display_index(patch, 1) == 5,
+		"hunk display indexes account for metadata and earlier hunk rows")
+	first_header, first_header_ok := history_patch_display_line(patch, 1)
+	second_header, second_header_ok := history_patch_display_line(patch, 5)
+	history_test_expect(failures, first_header_ok && first_header.hunk && first_header.hunk_index == 0 &&
+		second_header_ok && second_header.hunk && second_header.hunk_index == 1,
+		"retained display rows preserve their hunk identity")
+
+	index, changed := history_patch_hunk_step(4, 0, 1)
+	history_test_expect(failures, changed && index == 1, "next-hunk navigation advances one section")
+	index, changed = history_patch_hunk_step(4, index, -1)
+	history_test_expect(failures, changed && index == 0, "previous-hunk navigation returns to the prior section")
+	index, changed = history_patch_hunk_step(4, 3, 1)
+	history_test_expect(failures, !changed && index == 3, "last-hunk navigation clamps at the final section")
+	index, changed = history_patch_hunk_step(1, 0, 1)
+	history_test_expect(failures, !changed && index == 0, "single-hunk navigation remains at its only section")
+
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 400, 260})
+	defer alicorn.destroy_runtime(&rt)
+	ui, should_build := alicorn.begin_frame(&rt)
+	if !should_build {
+		history_test_expect(failures, false, "hunk-scroll fixture can begin a retained frame")
+		return
+	}
+	alicorn.container_begin(&ui, .Root, label="history-hunk-scroll-test-root", style=alicorn.layout_style(width=400, height=260))
+	long_scroll := alicorn.scroll_region_begin(
+		&ui,
+		key=alicorn.key_string("history-hunk-scroll-test-long"),
+		viewport_height=100,
+		content_height=4400,
+		line_height=HISTORY_PATCH_LINE_HEIGHT,
+		style=alicorn.layout_style(.Column, width=320, height=100, clip=true),
+		axes=.Vertical,
+	)
+	alicorn.scroll_region_end(&ui)
+	short_scroll := alicorn.scroll_region_begin(
+		&ui,
+		key=alicorn.key_string("history-hunk-scroll-test-short"),
+		viewport_height=100,
+		content_height=66,
+		line_height=HISTORY_PATCH_LINE_HEIGHT,
+		style=alicorn.layout_style(.Column, width=320, height=100, clip=true),
+		axes=.Vertical,
+	)
+	alicorn.scroll_region_end(&ui)
+	alicorn.container_end(&ui)
+	alicorn.end_frame(&ui)
+	history_test_expect(failures, long_scroll.id != 0 && short_scroll.id != 0, "hunk-scroll fixtures retain their scroll regions")
+
+	_ = alicorn.scroll_region_set_offset(&rt, long_scroll.id, long_scroll.max_scroll_y, "seed hunk scroll position")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 40)
+	long_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, long_state.offset_y == 836,
+		"next-hunk navigation aligns the heading near the viewport top with two lines of context")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 20)
+	previous_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, previous_state.offset_y == 396 && previous_state.offset_y < long_state.offset_y,
+		"previous-hunk navigation scrolls back to its earlier heading")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 220)
+	last_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, last_state.offset_y == last_state.max_scroll_y && last_state.offset_y <= last_state.max_scroll_y,
+		"last-hunk navigation clamps to the real document end")
+	_ = history_scroll_patch_hunk_to_start(&rt, short_scroll.id, 2)
+	short_state := alicorn.scroll_region_state(&rt, short_scroll.id)
+	history_test_expect(failures, short_state.offset_y == 0 && short_state.max_scroll_y == 0,
+		"short diffs keep hunk-navigation offsets at zero")
+
+	app := History_App{
+		has_selection=true,
+		selected_file_index=0,
+		selected_patch_hunk=3,
+		patch_scroll_node=long_scroll.id,
+	}
+	app.repository, _ = strings.clone(".")
+	app.selected_id, _ = strings.clone("fixture-commit")
+	app.selected_file_path, _ = strings.clone("first.odin")
+	app.detail.files = make([dynamic]Changed_File, 0, 2)
+	first_path, _ := strings.clone("first.odin")
+	second_path, _ := strings.clone("second.odin")
+	append(&app.detail.files, Changed_File{path=first_path, status=.Modified})
+	append(&app.detail.files, Changed_File{path=second_path, status=.Modified})
+	defer history_app_destroy(&app)
+	_ = alicorn.scroll_region_set_offset(&rt, long_scroll.id, 550, "seed file-switch scroll position")
+	_ = history_select_file_index(&app, 1)
+	history_reset_patch_scroll(&app, &rt)
+	reset_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, app.selected_file_index == 1 && app.selected_patch_hunk == 0 &&
+		reset_state.offset_y == 0 && !app.patch_scroll_reset_pending,
+		"changing the selected file resets its hunk and patch scroll position")
+}
+
+history_test_worker_patch_selection :: proc(failures: ^int, repository: string, commit: Commit, path: string) {
+	app := history_app_new(repository)
+	if app == nil {
+		history_test_expect(failures, false, "patch worker selection fixture allocates application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.commits = make([dynamic]Commit, 0, 1)
+	copy, copy_ok := commit_clone(commit)
+	if !copy_ok {
+		history_test_expect(failures, false, "patch worker selection fixture clones its selected commit")
+		return
+	}
+	append(&app.commits, copy)
+	app.visible = make([dynamic]int, 0, 1)
+	append(&app.visible, 0)
+	app.selected_id, _ = strings.clone(commit.id)
+	app.has_selection = true
+	app.selected_commit_index = 0
+	if !git_worker_start(&app.worker) {
+		history_test_expect(failures, false, "patch worker selection fixture starts the Git worker")
+		return
+	}
+	if !history_worker_submit_detail(app) {
+		history_test_expect(failures, false, "selected commit detail request enters the worker lane")
+		return
+	}
+
+	requested_source := false
+	patch_completed := false
+	for _ in 0..<5000 {
+		progress := false
+		for {
+			result, ok := chan.try_recv(app.worker.detail_results)
+			if !ok { break }
+			progress = true
+			accepted := history_adopt_result(app, result)
+			if accepted {
+				for file, index in app.detail.files {
+					if file.path == path {
+						app.selected_file_index = -1
+						requested_source = history_select_file_index(app, index)
+						break
+					}
+				}
+			}
+		}
+		for {
+			result, ok := chan.try_recv(app.worker.patch_results)
+			if !ok { break }
+			progress = true
+			_ = history_adopt_result(app, result)
+		}
+		if requested_source && !app.patch_loading {
+			patch_completed = app.patch.path == path && len(app.patch.hunks) > 0 && len(app.patch_error) == 0
+			break
+		}
+		if !progress { time.sleep(time.Millisecond) }
+	}
+	history_test_expect(failures, requested_source, "loaded commit details let the UI submit the selected source file patch")
+	history_test_expect(failures, patch_completed,
+		"latest-wins worker selection delivers and adopts textual hunks for the selected source file")
+}
+
 history_test_ref_selection_visibility :: proc(failures: ^int) {
 	app := history_app_new(".")
 	if app == nil {
@@ -398,6 +573,8 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 		history_app_destroy(app)
 		free(app)
 	}
+	history_test_expect(failures, history_repository_name(app.repository) != "." && len(history_repository_name(app.repository)) > 0,
+		"repository heading resolves the launch directory to its directory name")
 	app.loading = false
 	app.branch, _ = strings.clone("main")
 	app.commits = make([dynamic]Commit, 0, 48)
@@ -412,6 +589,8 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 	app.refs = make([dynamic]Git_Ref, 0, 2)
 	append(&app.refs, history_test_make_ref("refs/heads/main", "main", app.commits[0].id, app.commits[0].id, .Branch, true))
 	append(&app.refs, history_test_make_ref("refs/remotes/origin/main", "origin/main", app.commits[1].id, app.commits[1].id, .Remote))
+	long_ref_name := "feature/a-reference-name-longer-than-the-sidebar"
+	append(&app.refs, history_test_make_ref(fmt.tprintf("refs/heads/%s", long_ref_name), long_ref_name, app.commits[2].id, app.commits[2].id, .Branch))
 	history_rebuild_ref_rows(app)
 	history_rebuild_visible(app)
 
@@ -492,16 +671,16 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 	} else {
 		history_test_expect(failures, false, "three-pane refs/history/detail layout is retained")
 	}
-	ref_badge_identity := alicorn.visual_part_identity_hash(alicorn.visual_part_extension_id("app.history", "ref-badge"))
+	ref_marker_identity := alicorn.visual_part_identity_hash(alicorn.visual_part_extension_id("app.history", "ref-marker"))
 	commit_row_identity := alicorn.visual_part_identity_hash(alicorn.visual_part_extension_id("app.history", "commit-row"))
-	ref_badge_found, commit_row_found := false, false
+	ref_marker_found, commit_row_found := false, false
 	for id, part in rt.visual_parts {
 		identity := alicorn.visual_part_identity_hash(part.identity)
-		if identity == ref_badge_identity { ref_badge_found = true }
+		if identity == ref_marker_identity { ref_marker_found = true }
 		if identity == commit_row_identity { commit_row_found = true }
 	}
-	history_test_expect(failures, ref_badge_found && commit_row_found,
-		"History describes its Ref_Badge and Commit_Row with app-defined visual-part identities")
+	history_test_expect(failures, ref_marker_found && commit_row_found,
+		"History describes its ref marker and Commit_Row with app-defined visual-part identities")
 	history_test_expect(failures, app.refs_scroll_node != 0, "refs sidebar uses a retained scroll region")
 	if refs := alicorn.scroll_region_state(&rt, app.refs_scroll_node); app.refs_scroll_node != 0 {
 		history_test_expect(failures, refs.viewport_height > 0, "refs sidebar has a visible viewport")
@@ -510,6 +689,293 @@ history_test_view_layout_and_focus :: proc(failures: ^int) {
 		history_test_expect(failures, next != app.filter_node, "focus traversal advances past the filter")
 	} else {
 		history_test_expect(failures, false, "history view exposes a next focus target")
+	}
+	widths := [3]int{1050, 1200, 1600}
+	for width in widths {
+		rt.viewport = alicorn.Rect{0, 0, f32(width), 800}
+		rt.invalidated = true
+		rt.layout_pending = true
+		_ = history_build(rawptr(app), &rt, width, 800, 1)
+		name_id := history_test_find_text_node(&rt, long_ref_name)
+		name_ok := name_id != 0
+		if name_ok {
+			name := rt.nodes[name_id]
+			content := rt.nodes[name.parent]
+			marker_id := alicorn.Node_ID(0)
+			for child_id in content.children {
+				if child, ok := rt.nodes[child_id]; ok && child.label == "history-ref-marker" { marker_id = child_id; break }
+			}
+			if marker_id != 0 {
+				marker := rt.nodes[marker_id]
+				name_ok = marker.bounds.x+marker.bounds.w <= name.bounds.x &&
+					name.bounds.w > 0 && name.bounds.x+name.bounds.w <= content.bounds.x+content.bounds.w+1
+			} else {
+				name_ok = false
+			}
+		}
+		history_test_expect(failures, name_ok, fmt.tprintf("ref marker and ellipsized name stay in separate slots at %dpx window width", width))
+	}
+}
+
+history_test_find_text_node :: proc(rt: ^alicorn.Runtime, value: string) -> alicorn.Node_ID {
+	if rt == nil { return 0 }
+	for id, node in rt.nodes {
+		if node.kind == .Text && node.text == value { return id }
+	}
+	return 0
+}
+
+history_test_find_grid_text :: proc(rt: ^alicorn.Runtime, value: string, grid: alicorn.Node_ID, row, column: int) -> alicorn.Node_ID {
+	if rt == nil || grid == 0 { return 0 }
+	for id, node in rt.nodes {
+		if node.kind != .Text || node.text != value || !node.grid_item ||
+			int(node.grid_row) != row || int(node.grid_column) != column { continue }
+		current := node.parent
+		for depth := 0; current != 0 && depth < len(rt.nodes); depth += 1 {
+			if current == grid { return id }
+			parent, found := rt.nodes[current]
+			if !found { break }
+			current = parent.parent
+		}
+	}
+	return 0
+}
+
+history_test_single_line_text_fits :: proc(rt: ^alicorn.Runtime, id: alicorn.Node_ID) -> bool {
+	if rt == nil || id == 0 { return false }
+	node, ok := rt.nodes[id]
+	if !ok || node == nil || !node.text_run_valid || len(node.text_run.lines) != 1 { return false }
+	return node.text_run.width <= node.bounds.w+1 && node.text_run.height <= node.bounds.h+1
+}
+
+history_test_find_text_with_ancestor :: proc(rt: ^alicorn.Runtime, value: string, ancestor: alicorn.Node_ID) -> alicorn.Node_ID {
+	if rt == nil || ancestor == 0 { return 0 }
+	for id, node in rt.nodes {
+		if node.kind != .Text || node.text != value { continue }
+		current := node.parent
+		for depth := 0; current != 0 && depth < len(rt.nodes); depth += 1 {
+			if current == ancestor { return id }
+			parent, found := rt.nodes[current]
+			if !found { break }
+			current = parent.parent
+		}
+	}
+	return 0
+}
+
+history_test_semantic_press_actions_equal :: proc(a, b: alicorn.Semantic_Snapshot) -> bool {
+	a_count, b_count := 0, 0
+	for before in a.nodes {
+		if !alicorn.semantic_actions_has(before.actions, .Press) { continue }
+		a_count += 1
+		matched := false
+		for after in b.nodes {
+			if after.id != before.id { continue }
+			matched = after.role == before.role && after.actions == before.actions
+			break
+		}
+		if !matched { return false }
+	}
+	for after in b.nodes {
+		if alicorn.semantic_actions_has(after.actions, .Press) { b_count += 1 }
+	}
+	return a_count == b_count
+}
+
+history_test_detail_grid_resize :: proc(failures: ^int) {
+	app := history_app_new(".")
+	if app == nil {
+		history_test_expect(failures, false, "detail grid resize fixture allocates its application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.branch, _ = strings.clone("feature/responsive-grid-layout/with/a-deliberately-long-reference-name")
+	app.loading = false
+	app.commits = make([dynamic]Commit, 0, 1)
+	commit := Commit{}
+	commit.id, _ = strings.clone("c6a9a55689abcdef0123456789abcdef01234567")
+	commit.author_name, _ = strings.clone("Alexandra Example With A Deliberately Long Author Display Name")
+	commit.author_email, _ = strings.clone("alexandra.example.with.a.long.address@example.invalid")
+	commit.subject, _ = strings.clone("Dogfood the retained Grid layout with a long commit subject")
+	append(&app.commits, commit)
+	app.visible = make([dynamic]int, 0, 1)
+	append(&app.visible, 0)
+	app.has_selection = true
+	app.selected_commit_index = 0
+	app.selected_id, _ = strings.clone(commit.id)
+	app.detail.id, _ = strings.clone(commit.id)
+	app.detail.author_name, _ = strings.clone("Alexandra Example With A Deliberately Long Author Display Name")
+	app.detail.author_email, _ = strings.clone("alexandra.example.with.a.long.address@example.invalid")
+	app.detail.subject, _ = strings.clone("Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+	app.detail.files = make([dynamic]Changed_File, 0, 2)
+	first_path := "history_view.odin"
+	second_path := "tools/run.ps1"
+	first_file_path, _ := strings.clone(first_path)
+	second_file_path, _ := strings.clone(second_path)
+	append(&app.detail.files, Changed_File{path=first_file_path, status=.Modified, additions=24, deletions=2})
+	append(&app.detail.files, Changed_File{path=second_file_path, status=.Modified, additions=9, deletions=1})
+	app.selected_file_index = 0
+	app.selected_file_path, _ = strings.clone(first_path)
+	app.patch.path, _ = strings.clone(first_path)
+	app.patch.hunks = make([dynamic]Diff_Hunk, 0, 1)
+	header, _ := strings.clone("@@ -318,2 +318,5 @@ history_build")
+	lines := make([dynamic]Diff_Line, 0, 1)
+	line_text, _ := strings.clone("alicorn.grid_begin(&ui, alicorn.key_string(\"history-commit-properties\"), ...) ")
+	append(&lines, Diff_Line{kind=.Addition, new_line=318, text=line_text})
+	append(&app.patch.hunks, Diff_Hunk{old_start=318, old_count=2, new_start=318, new_count=5, header=header, lines=lines})
+	history_patch_prepare_display(&app.patch)
+
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
+	defer alicorn.destroy_runtime(&rt)
+	font_loaded := alicorn.text_engine_load_font(&rt.text_engine, HISTORY_TEST_FONT)
+	history_test_expect(failures, font_loaded, "adaptive metadata fixture loads its text measurement font")
+	widths := [4]int{1200, 1200, 1050, 1200}
+	wide_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 722)) == .Wide
+	compact_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 850)) == .Compact
+	history_test_expect(failures, wide_split_mode && compact_split_mode,
+		"metadata presentation follows changed Split allocation at a stable window width")
+	metadata_owner := alicorn.Node_ID(0)
+	focus_id := alicorn.Node_ID(0)
+	wide_metadata_bounds := alicorn.Rect{}
+	wide_grid_bounds := alicorn.Rect{}
+	wide_author_bounds := alicorn.Rect{}
+	wide_message_bounds := alicorn.Rect{}
+	semantic_before := alicorn.Semantic_Snapshot{}
+	semantic_before_valid := false
+	for width, width_index in widths {
+		incoming_width := history_detail_incoming_width(width, 722)
+		presentation := history_commit_metadata_presentation(incoming_width)
+		rt.viewport = alicorn.Rect{0, 0, f32(width), 800}
+		rt.invalidated = true
+		rt.layout_pending = true
+		_ = history_build(rawptr(app), &rt, width, 800, 1)
+		if width_index == 1 {
+			focused := alicorn.focus(&rt, app.filter_node)
+			focus_id = alicorn.focused_node(&rt)
+			semantic_before = alicorn.semantic_snapshot(&rt)
+			semantic_before_valid = focused && focus_id != 0
+		}
+		metadata_id := alicorn.Node_ID(0)
+		grid_id := alicorn.Node_ID(0)
+		compact_id := alicorn.Node_ID(0)
+		for id, node in rt.nodes {
+			if node.label == "history-commit-properties" { metadata_id = id }
+			if node.label == "history-commit-properties-wide-grid" { grid_id = id }
+			if node.label == "history-commit-properties-compact" { compact_id = id }
+		}
+		if metadata_owner == 0 { metadata_owner = metadata_id }
+		owner_ok := metadata_id != 0 && metadata_id == metadata_owner
+		grid_ok := presentation == .Wide && grid_id != 0
+		if grid_ok {
+			grid := rt.nodes[grid_id]
+			metadata := rt.nodes[metadata_id]
+			detail_heading_id := history_test_find_text_node(&rt, "Changed files (2)")
+			detail_heading_ok := detail_heading_id != 0 && rt.nodes[detail_heading_id].bounds.y >= metadata.bounds.y+metadata.bounds.h-1
+			grid_ok = grid_ok && detail_heading_ok
+			author_text := fmt.tprintf("%s <%s>", commit.author_name, commit.author_email)
+			row_labels := [4]string{"Author", "Commit", "Branch", "Message"}
+			row_values := [4]string{author_text, commit_short_id(commit), app.branch, app.detail.subject}
+			previous_bottom := grid.bounds.y
+			grid_ok = grid.bounds.w > 0 && grid.bounds.h >= HISTORY_METADATA_GRID_HEIGHT-1
+			for row in 0..<len(row_labels) {
+				label_id := history_test_find_grid_text(&rt, row_labels[row], grid_id, row, 0)
+				value_id := history_test_find_grid_text(&rt, row_values[row], grid_id, row, 1)
+				if label_id == 0 || value_id == 0 { grid_ok = false; continue }
+				label, value := rt.nodes[label_id], rt.nodes[value_id]
+				row_top := label.bounds.y
+				if value.bounds.y < row_top { row_top = value.bounds.y }
+				row_bottom := label.bounds.y+label.bounds.h
+				value_bottom := value.bounds.y+value.bounds.h
+				if value_bottom > row_bottom { row_bottom = value_bottom }
+				cells_ok := int(label.grid_row) == row && int(value.grid_row) == row &&
+					int(label.grid_column) == 0 && int(value.grid_column) == 1 &&
+					label.bounds.x >= grid.bounds.x && value.bounds.x >= label.bounds.x+label.bounds.w-1 &&
+					label.bounds.x+label.bounds.w <= grid.bounds.x+grid.bounds.w+1 &&
+					value.bounds.x+value.bounds.w <= grid.bounds.x+grid.bounds.w+1 &&
+					row_top >= grid.bounds.y && row_bottom <= grid.bounds.y+grid.bounds.h+1 &&
+					history_test_single_line_text_fits(&rt, label_id) && history_test_single_line_text_fits(&rt, value_id)
+				if row > 0 && row_top < previous_bottom { cells_ok = false }
+				grid_ok = grid_ok && cells_ok
+				previous_bottom = row_bottom
+			}
+		}
+		compact_ok := presentation == .Compact && compact_id != 0
+		if compact_ok {
+			compact := rt.nodes[compact_id]
+			author_id := history_test_find_text_with_ancestor(&rt, "Alexandra Example With A Deliberately Long Author Display Name", compact_id)
+			commit_id := history_test_find_text_with_ancestor(&rt, "c6a9a556", compact_id)
+			message_id := history_test_find_text_with_ancestor(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible", compact_id)
+			branch_id := history_test_find_text_with_ancestor(&rt, app.branch, compact_id)
+			compact_ok = author_id != 0 && commit_id != 0 && message_id != 0 && branch_id != 0
+			if compact_ok {
+				author, commit_text := rt.nodes[author_id], rt.nodes[commit_id]
+				message, branch := rt.nodes[message_id], rt.nodes[branch_id]
+				branch_chip_id := alicorn.Node_ID(0)
+				for id, node in rt.nodes {
+					if node.label == "history-commit-properties-branch-chip" { branch_chip_id = id; break }
+				}
+				branch_chip := rt.nodes[branch_chip_id]
+				compact_ok = compact.bounds.w > 0 && compact.bounds.h > 0 &&
+					author.bounds.x < commit_text.bounds.x && author.bounds.w > 0 && commit_text.bounds.w > 0 &&
+					message.bounds.y >= compact.bounds.y && message.bounds.y+message.bounds.h <= compact.bounds.y+compact.bounds.h+1 &&
+					branch.bounds.y >= compact.bounds.y && branch.bounds.y+branch.bounds.h <= compact.bounds.y+compact.bounds.h+1 &&
+					branch_chip_id != 0 && branch_chip.bounds.w >= compact.bounds.w-1 &&
+					branch.bounds.x >= branch_chip.bounds.x && branch.bounds.x+branch.bounds.w <= branch_chip.bounds.x+branch_chip.bounds.w+1 &&
+					history_test_single_line_text_fits(&rt, branch_id)
+			}
+		}
+		author_text := "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>"
+		if presentation == .Compact { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
+		author_id := history_test_find_text_node(&rt, author_text)
+		stats_id := history_test_find_text_node(&rt, "+24 -2")
+		file_name_id := history_test_find_text_node(&rt, first_path)
+		rows_ok := author_id != 0 && stats_id != 0 && file_name_id != 0
+		if rows_ok {
+			author := rt.nodes[author_id]
+			stats := rt.nodes[stats_id]
+			file_name := rt.nodes[file_name_id]
+			rows_ok = author.bounds.w > 0 && stats.bounds.x >= 0 && file_name.bounds.w > 0 &&
+				stats.bounds.x+stats.bounds.w <= file_name.bounds.x+1
+		}
+		mode_ok := (presentation == .Wide && grid_ok) || (presentation == .Compact && compact_ok)
+		history_test_expect(failures, owner_ok && mode_ok && rows_ok,
+			fmt.tprintf("adaptive commit metadata and left-aligned file row remain bounded at %dpx window width", width))
+		history_test_expect(failures, app.selected_id == commit.id && app.selected_file_path == first_path && app.selected_file_index == 0,
+			"adaptive presentation preserves selected commit and changed-file identity")
+		if width_index == 1 && presentation == .Wide && grid_ok && author_id != 0 {
+			wide_metadata_bounds = rt.nodes[metadata_id].bounds
+			wide_grid_bounds = rt.nodes[grid_id].bounds
+			wide_author_bounds = rt.nodes[author_id].bounds
+			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+			if message_id != 0 { wide_message_bounds = rt.nodes[message_id].bounds }
+		}
+		if presentation == .Compact {
+			before_press_actions := 0
+			for node in semantic_before.nodes {
+				if alicorn.semantic_actions_has(node.actions, .Press) { before_press_actions += 1 }
+			}
+			semantic_before_valid = semantic_before_valid && before_press_actions > 0
+			history_test_expect(failures, semantic_before_valid, "adaptive fixture captures existing semantic Press actions before switching")
+			history_test_expect(failures, focus_id != 0 && alicorn.focused_node(&rt) == focus_id,
+				"adaptive presentation preserves focus outside the metadata component")
+			after := alicorn.semantic_snapshot(&rt)
+			history_test_expect(failures, semantic_before_valid && history_test_semantic_press_actions_equal(semantic_before, after),
+				"adaptive presentation preserves semantic action identities")
+			alicorn.semantic_snapshot_destroy(&semantic_before)
+			alicorn.semantic_snapshot_destroy(&after)
+			semantic_before_valid = false
+		}
+		if width_index == 3 {
+			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+			replay_ok := presentation == .Wide && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
+				rt.nodes[metadata_id].bounds == wide_metadata_bounds && rt.nodes[grid_id].bounds == wide_grid_bounds &&
+				rt.nodes[author_id].bounds == wide_author_bounds && rt.nodes[message_id].bounds == wide_message_bounds
+			history_test_expect(failures, replay_ok,
+				"adaptive presentation deterministically replays the wide alternative when its incoming width returns")
+		}
 	}
 }
 
@@ -522,6 +988,15 @@ history_test_clean_object_id :: proc(value: string) -> bool {
 
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
+	subdirectory := fmt.tprintf("%s/out", repository)
+	if os.is_dir(subdirectory) {
+		subdirectory_root := history_absolute_repository(subdirectory)
+		repository_root := history_absolute_repository(repository)
+		history_test_expect(&failures, len(subdirectory_root) > 0 && subdirectory_root == repository_root,
+			"launching from a repository subdirectory resolves Git's worktree root")
+		if len(subdirectory_root) > 0 { delete(subdirectory_root) }
+		if len(repository_root) > 0 { delete(repository_root) }
+	}
 	data := make([dynamic]u8, 0, 160)
 	append(&data, "abc\x00parent\x00Ada\x00ada@example.com\x001700000000\x00first commit\x00\x00")
 	append(&data, "def\x00\x00Grace\x00grace@example.com\x001700000001\x00second commit\x00\x00")
@@ -549,8 +1024,10 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_patch_parser(&failures)
 	history_test_patch_generation(&failures)
 	history_test_large_patch(&failures)
+	history_test_patch_hunk_navigation(&failures)
 	history_test_ref_selection_visibility(&failures)
 	history_test_view_layout_and_focus(&failures)
+	history_test_detail_grid_resize(&failures)
 	history_test_dag_geometry(&failures)
 	history_test_large_dag_virtual_projection(&failures)
 
@@ -609,20 +1086,34 @@ history_run_tests :: proc(repository: string) -> bool {
 		if len(refs_stdout) > 0 { delete(refs_stdout) }
 		if len(refs_stderr) > 0 { delete(refs_stderr) }
 		_ = refs_exit_code
-		limit := min(len(real_commits), 3)
+		limit := min(len(real_commits), 8)
 		patch_tested := false
+		source_patch_tested := false
 		for i := 0; i < limit; i += 1 {
 			history_test_expect(&failures, history_test_clean_object_id(real_commits[i].id), fmt.tprintf("parsed commit %d has no record-separator bytes", i))
 			detail, detail_error := git_load_commit_detail(repository, real_commits[i].id)
 			history_test_expect(&failures, len(detail_error) == 0, fmt.tprintf("commit detail query succeeds for parsed commit %d", i))
 			history_test_expect(&failures, detail.id == real_commits[i].id, fmt.tprintf("commit detail preserves stable identity for parsed commit %d", i))
-			if !patch_tested && len(detail.files) > 0 {
-				patch, patch_error := git_load_file_patch(repository, real_commits[i].id, detail.files[0].path)
-				history_test_expect(&failures, len(patch_error) == 0, "selected file patch query succeeds")
-				history_test_expect(&failures, patch.path == detail.files[0].path, "selected file patch preserves its path")
-				file_patch_destroy(&patch)
-				if len(patch_error) > 0 { delete(patch_error) }
-				patch_tested = true
+			for file in detail.files {
+				if !patch_tested {
+					patch, patch_error := git_load_file_patch(repository, real_commits[i].id, file.path)
+					history_test_expect(&failures, len(patch_error) == 0, "selected file patch query succeeds")
+					history_test_expect(&failures, patch.path == file.path, "selected file patch preserves its path")
+					file_patch_destroy(&patch)
+					if len(patch_error) > 0 { delete(patch_error) }
+					patch_tested = true
+				}
+				is_odin_source := len(file.path) >= 5 && file.path[len(file.path)-5:] == ".odin"
+				if !source_patch_tested && is_odin_source && (file.additions > 0 || file.deletions > 0) {
+					patch, patch_error := git_load_file_patch(repository, real_commits[i].id, file.path)
+					history_test_expect(&failures, len(patch_error) == 0, "changed Odin source patch query succeeds")
+					history_test_expect(&failures, len(patch.hunks) > 0, "changed Odin source file produces parsed textual hunks")
+					history_test_expect(&failures, patch.path == file.path, "changed Odin source patch retains the selected file identity")
+					file_patch_destroy(&patch)
+					if len(patch_error) > 0 { delete(patch_error) }
+					history_test_worker_patch_selection(&failures, repository, real_commits[i], file.path)
+					source_patch_tested = true
+				}
 			}
 			// Empty commits are valid Git objects; a successful detail query does
 			// not require at least one changed file.
