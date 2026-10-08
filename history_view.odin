@@ -207,6 +207,35 @@ history_patch_hunk_display_index :: proc(patch: File_Patch, hunk_index: int) -> 
 	return -1
 }
 
+history_patch_hunk_step :: proc(hunk_count, current_index, direction: int) -> (next_index: int, changed: bool) {
+	if hunk_count <= 0 { return 0, false }
+	next_index = current_index
+	if next_index < 0 { next_index = 0 }
+	if next_index >= hunk_count { next_index = hunk_count-1 }
+	if direction > 0 && next_index+1 < hunk_count { next_index += 1 }
+	if direction < 0 && next_index > 0 { next_index -= 1 }
+	changed = next_index != current_index
+	return
+}
+
+history_scroll_patch_hunk_to_start :: proc(rt: ^alicorn.Runtime, scroll_node: alicorn.Node_ID, display_index: int) -> bool {
+	if rt == nil || scroll_node == 0 || display_index < 0 { return false }
+	scroll := alicorn.scroll_region_state(rt, scroll_node)
+	if scroll.id == 0 { return false }
+	desired_offset := f32(display_index)*HISTORY_PATCH_LINE_HEIGHT - 2*HISTORY_PATCH_LINE_HEIGHT
+	if desired_offset < 0 { desired_offset = 0 }
+	if desired_offset > scroll.max_scroll_y { desired_offset = scroll.max_scroll_y }
+	return alicorn.scroll_region_set_offset(rt, scroll_node, desired_offset, "history hunk navigation")
+}
+
+history_reset_patch_scroll :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
+	if app == nil || rt == nil || !app.patch_scroll_reset_pending { return }
+	if app.patch_scroll_node != 0 {
+		_ = alicorn.scroll_region_set_offset(rt, app.patch_scroll_node, 0, "history patch selection changed")
+	}
+	app.patch_scroll_reset_pending = false
+}
+
 history_patch_content_width :: proc(patch: File_Patch) -> f32 {
 	if patch.content_width > 0 { return patch.content_width }
 	width: f32 = 720
@@ -550,9 +579,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 						style=alicorn.layout_style(.Row, width=84, height=28),
 					)
 					alicorn.button_end(&ui)
-					if previous_hunk_clicked && app.selected_patch_hunk > 0 {
-						app.selected_patch_hunk -= 1
-						patch_hunk_changed = true
+					if previous_hunk_clicked {
+						app.selected_patch_hunk, patch_hunk_changed = history_patch_hunk_step(hunk_count, app.selected_patch_hunk, -1)
 					}
 					alicorn.text(&ui, fmt.tprintf("Hunk %d / %d", app.selected_patch_hunk+1, hunk_count), style=alicorn.layout_style(.Row, height=26, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
 					_, next_hunk_clicked := alicorn.button_begin(
@@ -563,9 +591,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 						style=alicorn.layout_style(.Row, width=84, height=28),
 					)
 					alicorn.button_end(&ui)
-					if next_hunk_clicked && app.selected_patch_hunk+1 < hunk_count {
-						app.selected_patch_hunk += 1
-						patch_hunk_changed = true
+					if next_hunk_clicked {
+						app.selected_patch_hunk, patch_hunk_changed = history_patch_hunk_step(hunk_count, app.selected_patch_hunk, 1)
 					}
 					alicorn.container_end(&ui)
 					if patch_hunk_changed {
@@ -585,6 +612,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					axis_behavior=.Auto_Lock,
 				)
 				patch_hunk_scroll_node = patch_list.scroll.id
+				app.patch_scroll_node = patch_list.scroll.id
 				for position := patch_list.first; position < patch_list.last; position += 1 {
 					line, line_ok := history_patch_display_line(app.patch, position)
 					if !line_ok { continue }
@@ -638,6 +666,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.container_end(&ui)
 	alicorn.split_second_end(&ui, outer_split)
 	alicorn.split_end(&ui, outer_split)
+	history_reset_patch_scroll(app, rt)
 	alicorn.end_frame(&ui)
 	if app.commit_graph_node == 0 {
 		app.graph_geometry_node = 0
@@ -700,7 +729,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	if patch_hunk_changed {
 		alicorn.invalidate_root(rt, "history patch hunk changed")
 		if patch_hunk_scroll_node != 0 && patch_hunk_scroll_target >= 0 {
-			_ = alicorn.virtual_list_ensure_visible(rt, patch_hunk_scroll_node, patch_hunk_scroll_target, "history hunk navigation")
+			_ = history_scroll_patch_hunk_to_start(rt, patch_hunk_scroll_node, patch_hunk_scroll_target)
 		}
 	}
 	_ = dpi_scale

@@ -43,6 +43,8 @@ History_App :: struct {
 	selected_file_index: int,
 	selected_file_path:  string,
 	selected_patch_hunk: int,
+	patch_scroll_node:   alicorn.Node_ID,
+	patch_scroll_reset_pending: bool,
 	patch:               File_Patch,
 	patch_loading:       bool,
 	patch_error:         string,
@@ -182,6 +184,7 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 history_reset_patch_storage :: proc(app: ^History_App) {
 	file_patch_destroy(&app.patch)
 	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = false
@@ -240,6 +243,7 @@ history_worker_submit_patch :: proc(app: ^History_App) -> bool {
 	app.latest_patch_id = app.next_patch_id
 	file_patch_destroy(&app.patch)
 	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
 	app.patch_error = ""
 	app.patch_loading = true
@@ -268,6 +272,8 @@ history_select_file_index :: proc(app: ^History_App, index: int) -> bool {
 	if len(app.selected_file_path) > 0 { delete(app.selected_file_path) }
 	app.selected_file_path = copy
 	app.selected_file_index = index
+	app.selected_patch_hunk = 0
+	app.patch_scroll_reset_pending = true
 	return history_worker_submit_patch(app)
 }
 

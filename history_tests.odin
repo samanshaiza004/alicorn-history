@@ -349,6 +349,109 @@ history_test_large_patch :: proc(failures: ^int) {
 	if len(error_text) > 0 { delete(error_text) }
 }
 
+history_test_patch_hunk_navigation :: proc(failures: ^int) {
+	patch := File_Patch{}
+	patch.metadata = make([dynamic]string, 0, 1)
+	append(&patch.metadata, "")
+	patch.hunks = make([dynamic]Diff_Hunk, 0, 4)
+	for _ in 0..<4 {
+		lines := make([dynamic]Diff_Line, 0, 3)
+		for _ in 0..<3 { append(&lines, Diff_Line{}) }
+		append(&patch.hunks, Diff_Hunk{header="", lines=lines})
+	}
+	history_patch_prepare_display(&patch)
+	defer file_patch_destroy(&patch)
+	history_test_expect(failures, history_patch_hunk_display_index(patch, 0) == 1 && history_patch_hunk_display_index(patch, 1) == 5,
+		"hunk display indexes account for metadata and earlier hunk rows")
+	first_header, first_header_ok := history_patch_display_line(patch, 1)
+	second_header, second_header_ok := history_patch_display_line(patch, 5)
+	history_test_expect(failures, first_header_ok && first_header.hunk && first_header.hunk_index == 0 &&
+		second_header_ok && second_header.hunk && second_header.hunk_index == 1,
+		"retained display rows preserve their hunk identity")
+
+	index, changed := history_patch_hunk_step(4, 0, 1)
+	history_test_expect(failures, changed && index == 1, "next-hunk navigation advances one section")
+	index, changed = history_patch_hunk_step(4, index, -1)
+	history_test_expect(failures, changed && index == 0, "previous-hunk navigation returns to the prior section")
+	index, changed = history_patch_hunk_step(4, 3, 1)
+	history_test_expect(failures, !changed && index == 3, "last-hunk navigation clamps at the final section")
+	index, changed = history_patch_hunk_step(1, 0, 1)
+	history_test_expect(failures, !changed && index == 0, "single-hunk navigation remains at its only section")
+
+	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 400, 260})
+	defer alicorn.destroy_runtime(&rt)
+	ui, should_build := alicorn.begin_frame(&rt)
+	if !should_build {
+		history_test_expect(failures, false, "hunk-scroll fixture can begin a retained frame")
+		return
+	}
+	alicorn.container_begin(&ui, .Root, label="history-hunk-scroll-test-root", style=alicorn.layout_style(width=400, height=260))
+	long_scroll := alicorn.scroll_region_begin(
+		&ui,
+		key=alicorn.key_string("history-hunk-scroll-test-long"),
+		viewport_height=100,
+		content_height=4400,
+		line_height=HISTORY_PATCH_LINE_HEIGHT,
+		style=alicorn.layout_style(.Column, width=320, height=100, clip=true),
+		axes=.Vertical,
+	)
+	alicorn.scroll_region_end(&ui)
+	short_scroll := alicorn.scroll_region_begin(
+		&ui,
+		key=alicorn.key_string("history-hunk-scroll-test-short"),
+		viewport_height=100,
+		content_height=66,
+		line_height=HISTORY_PATCH_LINE_HEIGHT,
+		style=alicorn.layout_style(.Column, width=320, height=100, clip=true),
+		axes=.Vertical,
+	)
+	alicorn.scroll_region_end(&ui)
+	alicorn.container_end(&ui)
+	alicorn.end_frame(&ui)
+	history_test_expect(failures, long_scroll.id != 0 && short_scroll.id != 0, "hunk-scroll fixtures retain their scroll regions")
+
+	_ = alicorn.scroll_region_set_offset(&rt, long_scroll.id, long_scroll.max_scroll_y, "seed hunk scroll position")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 40)
+	long_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, long_state.offset_y == 836,
+		"next-hunk navigation aligns the heading near the viewport top with two lines of context")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 20)
+	previous_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, previous_state.offset_y == 396 && previous_state.offset_y < long_state.offset_y,
+		"previous-hunk navigation scrolls back to its earlier heading")
+	_ = history_scroll_patch_hunk_to_start(&rt, long_scroll.id, 220)
+	last_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, last_state.offset_y == last_state.max_scroll_y && last_state.offset_y <= last_state.max_scroll_y,
+		"last-hunk navigation clamps to the real document end")
+	_ = history_scroll_patch_hunk_to_start(&rt, short_scroll.id, 2)
+	short_state := alicorn.scroll_region_state(&rt, short_scroll.id)
+	history_test_expect(failures, short_state.offset_y == 0 && short_state.max_scroll_y == 0,
+		"short diffs keep hunk-navigation offsets at zero")
+
+	app := History_App{
+		has_selection=true,
+		selected_file_index=0,
+		selected_patch_hunk=3,
+		patch_scroll_node=long_scroll.id,
+	}
+	app.repository, _ = strings.clone(".")
+	app.selected_id, _ = strings.clone("fixture-commit")
+	app.selected_file_path, _ = strings.clone("first.odin")
+	app.detail.files = make([dynamic]Changed_File, 0, 2)
+	first_path, _ := strings.clone("first.odin")
+	second_path, _ := strings.clone("second.odin")
+	append(&app.detail.files, Changed_File{path=first_path, status=.Modified})
+	append(&app.detail.files, Changed_File{path=second_path, status=.Modified})
+	defer history_app_destroy(&app)
+	_ = alicorn.scroll_region_set_offset(&rt, long_scroll.id, 550, "seed file-switch scroll position")
+	_ = history_select_file_index(&app, 1)
+	history_reset_patch_scroll(&app, &rt)
+	reset_state := alicorn.scroll_region_state(&rt, long_scroll.id)
+	history_test_expect(failures, app.selected_file_index == 1 && app.selected_patch_hunk == 0 &&
+		reset_state.offset_y == 0 && !app.patch_scroll_reset_pending,
+		"changing the selected file resets its hunk and patch scroll position")
+}
+
 history_test_worker_patch_selection :: proc(failures: ^int, repository: string, commit: Commit, path: string) {
 	app := history_app_new(repository)
 	if app == nil {
@@ -622,6 +725,22 @@ history_test_find_text_node :: proc(rt: ^alicorn.Runtime, value: string) -> alic
 	return 0
 }
 
+history_test_find_grid_text :: proc(rt: ^alicorn.Runtime, value: string, grid: alicorn.Node_ID, row, column: int) -> alicorn.Node_ID {
+	if rt == nil || grid == 0 { return 0 }
+	for id, node in rt.nodes {
+		if node.kind != .Text || node.text != value || !node.grid_item ||
+			int(node.grid_row) != row || int(node.grid_column) != column { continue }
+		current := node.parent
+		for depth := 0; current != 0 && depth < len(rt.nodes); depth += 1 {
+			if current == grid { return id }
+			parent, found := rt.nodes[current]
+			if !found { break }
+			current = parent.parent
+		}
+	}
+	return 0
+}
+
 history_test_single_line_text_fits :: proc(rt: ^alicorn.Runtime, id: alicorn.Node_ID) -> bool {
 	if rt == nil || id == 0 { return false }
 	node, ok := rt.nodes[id]
@@ -762,8 +881,8 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			previous_bottom := grid.bounds.y
 			grid_ok = grid.bounds.w > 0 && grid.bounds.h >= HISTORY_METADATA_GRID_HEIGHT-1
 			for row in 0..<len(row_labels) {
-				label_id := history_test_find_text_node(&rt, row_labels[row])
-				value_id := history_test_find_text_node(&rt, row_values[row])
+				label_id := history_test_find_grid_text(&rt, row_labels[row], grid_id, row, 0)
+				value_id := history_test_find_grid_text(&rt, row_values[row], grid_id, row, 1)
 				if label_id == 0 || value_id == 0 { grid_ok = false; continue }
 				label, value := rt.nodes[label_id], rt.nodes[value_id]
 				row_top := label.bounds.y
@@ -905,6 +1024,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_patch_parser(&failures)
 	history_test_patch_generation(&failures)
 	history_test_large_patch(&failures)
+	history_test_patch_hunk_navigation(&failures)
 	history_test_ref_selection_visibility(&failures)
 	history_test_view_layout_and_focus(&failures)
 	history_test_detail_grid_resize(&failures)
