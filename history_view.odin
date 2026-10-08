@@ -15,6 +15,99 @@ HISTORY_FILE_ROW_HEIGHT   :: f32(32)
 HISTORY_PATCH_LINE_HEIGHT :: f32(22)
 HISTORY_REF_ROW_HEIGHT    :: f32(24)
 HISTORY_FILE_LIST_HEIGHT  :: f32(104)
+HISTORY_ROOT_PADDING :: f32(12)
+HISTORY_WORKSPACE_DIVIDER_WIDTH :: f32(2)
+HISTORY_DETAIL_MIN_WIDTH :: f32(280)
+HISTORY_METADATA_WIDE_MIN_WIDTH :: f32(380)
+
+History_Commit_Metadata_Presentation :: enum { Wide, Compact }
+
+// The incoming width is the space left by the workspace Split after its
+// retained first-pane preference and divider. Metadata selection must not
+// depend on geometry produced by the selected presentation.
+history_detail_incoming_width :: proc(window_width: int, preferred_first_width: f32) -> f32 {
+	root_content_width := f32(window_width)-2*HISTORY_ROOT_PADDING
+	if root_content_width < 0 { root_content_width = 0 }
+	first_width := preferred_first_width
+	if first_width < 0 { first_width = 0 }
+	incoming_width := root_content_width-first_width-HISTORY_WORKSPACE_DIVIDER_WIDTH
+	if incoming_width < HISTORY_DETAIL_MIN_WIDTH { incoming_width = HISTORY_DETAIL_MIN_WIDTH }
+	return incoming_width
+}
+
+history_commit_metadata_presentation :: proc(incoming_width: f32) -> History_Commit_Metadata_Presentation {
+	if incoming_width >= HISTORY_METADATA_WIDE_MIN_WIDTH { return .Wide }
+	return .Compact
+}
+
+history_build_commit_metadata :: proc(ui_value: alicorn.UI, app: ^History_App, commit: Commit, presentation: History_Commit_Metadata_Presentation) {
+	ui := ui_value
+	alicorn.container_begin(&ui, .Container,
+		label="history-commit-properties",
+		key=alicorn.key_string("history-commit-properties"),
+		style=alicorn.layout_style(.Column, height=alicorn.LAYOUT_SIZE_FIT_CONTENT, gap=4))
+
+	message := commit.subject
+	if app.detail.id == app.selected_id && len(app.detail.subject) > 0 { message = app.detail.subject }
+	if presentation == .Wide {
+		property_columns := [2]alicorn.Grid_Track{alicorn.grid_fixed(76), alicorn.grid_fraction(1)}
+		property_rows := [4]alicorn.Grid_Track{alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto()}
+		alicorn.grid_begin(&ui, alicorn.key_string("history-commit-properties-wide-grid"), property_columns[:], property_rows[:],
+			style=alicorn.layout_style(width=-1, height=alicorn.LAYOUT_SIZE_FIT_CONTENT), gap_x=8, gap_y=4,
+			label="history-commit-properties-wide-grid")
+		author_label := alicorn.text(&ui, "Author", key=alicorn.key_string("history-property-author-label"))
+		_ = alicorn.grid_cell(&ui, author_label, 0, 0, align_y=.Baseline)
+		author_value := alicorn.text(&ui, fmt.tprintf("%s <%s>", commit.author_name, commit.author_email), key=alicorn.key_string("history-property-author-value"))
+		_ = alicorn.grid_cell(&ui, author_value, 0, 1, align_y=.Baseline)
+		commit_label := alicorn.text(&ui, "Commit", key=alicorn.key_string("history-property-commit-label"))
+		_ = alicorn.grid_cell(&ui, commit_label, 1, 0, align_y=.Baseline)
+		commit_value := alicorn.text(&ui, commit_short_id(commit), key=alicorn.key_string("history-property-commit-value"))
+		_ = alicorn.grid_cell(&ui, commit_value, 1, 1, align_y=.Baseline)
+		branch_label := alicorn.text(&ui, "Branch", key=alicorn.key_string("history-property-branch-label"))
+		_ = alicorn.grid_cell(&ui, branch_label, 2, 0, align_y=.Baseline)
+		branch_value := alicorn.text(&ui, app.branch, key=alicorn.key_string("history-property-branch-value"))
+		_ = alicorn.grid_cell(&ui, branch_value, 2, 1, align_y=.Baseline)
+		message_label := alicorn.text(&ui, "Message", key=alicorn.key_string("history-property-message-label"))
+		_ = alicorn.grid_cell(&ui, message_label, 3, 0, align_y=.Baseline)
+		message_value := alicorn.text(&ui, message, key=alicorn.key_string("history-property-message-value"))
+		_ = alicorn.grid_cell(&ui, message_value, 3, 1, align_y=.Baseline)
+		alicorn.grid_end(&ui)
+	} else {
+		alicorn.container_begin(&ui, .Container,
+			label="history-commit-properties-compact",
+			key=alicorn.key_string("history-commit-properties-compact"),
+			style=alicorn.layout_style(.Column, height=alicorn.LAYOUT_SIZE_FIT_CONTENT, gap=2))
+		alicorn.container_begin(&ui, .Container,
+			label="history-commit-properties-identity",
+			key=alicorn.key_string("history-commit-properties-identity"),
+			style=alicorn.layout_style(.Row, height=26, align=.Center, gap=8))
+		alicorn.text(&ui, commit.author_name,
+			key=alicorn.key_string("history-property-author-value"),
+			style=alicorn.layout_style(.Row, height=24, grow=1),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
+		alicorn.text(&ui, commit_short_id(commit),
+			key=alicorn.key_string("history-property-commit-value"),
+			style=alicorn.layout_style(.Row, width=76, height=24, align=.End),
+			text_style=alicorn.Text_Style{overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+		alicorn.text(&ui, message,
+			key=alicorn.key_string("history-property-message-value"),
+			style=alicorn.layout_style(.Row, height=24),
+			text_style=alicorn.Text_Style{overflow=.Ellipsis})
+		alicorn.container_begin(&ui, .Container,
+			label="history-commit-properties-branch-chip",
+			key=alicorn.key_string("history-commit-properties-branch-chip"),
+			style=alicorn.layout_style(.Row, width=alicorn.LAYOUT_SIZE_FIT_CONTENT, height=20, padding=6, align=.Center),
+			color=HEADER_BG)
+		alicorn.text(&ui, app.branch,
+			key=alicorn.key_string("history-property-branch-value"),
+			style=alicorn.layout_style(.Row, height=18),
+			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+		alicorn.container_end(&ui)
+	}
+	alicorn.container_end(&ui)
+}
 
 history_ref_heading :: proc(kind: Git_Ref_Kind) -> (label, key: string) {
 	#partial switch kind {
@@ -125,7 +218,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	commit_graph_first := 0
 	commit_graph_last := 0
 
-	root_style := alicorn.layout_style(padding=12, gap=8, clip=true)
+	root_style := alicorn.layout_style(padding=HISTORY_ROOT_PADDING, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
 
 	status := "Loading history..."
@@ -165,10 +258,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		axis=.Horizontal,
 		initial=722,
 		min_first=452,
-		min_second=280,
+		min_second=HISTORY_DETAIL_MIN_WIDTH,
 		style=alicorn.layout_style(.Row, grow=1, gap=12, clip=true),
 		label="history-workspace-detail-split",
 	)
+	metadata_width := history_detail_incoming_width(logical_width, outer_split.position)
+	metadata_presentation := history_commit_metadata_presentation(metadata_width)
 	alicorn.split_first_begin(&ui, outer_split)
 	inner_split := alicorn.split_begin(
 		&ui,
@@ -327,35 +422,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.split_second_end(&ui, inner_split)
 	alicorn.split_end(&ui, inner_split)
 	alicorn.split_first_end(&ui, outer_split)
-	alicorn.split_divider(&ui, outer_split)
+	alicorn.split_divider(&ui, outer_split, thickness=HISTORY_WORKSPACE_DIVIDER_WIDTH)
 	alicorn.split_second_begin(&ui, outer_split)
 	alicorn.container_begin(&ui, .Container, label="history-detail-panel", style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true), color=PANEL_BG)
 	if app.has_selection && app.selected_commit_index >= 0 && app.selected_commit_index < len(app.commits) {
 		commit := app.commits[app.selected_commit_index]
-		property_columns := [2]alicorn.Grid_Track{alicorn.grid_fixed(76), alicorn.grid_fraction(1)}
-		property_rows := [4]alicorn.Grid_Track{alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto()}
-		alicorn.grid_begin(&ui, alicorn.key_string("history-commit-properties"), property_columns[:], property_rows[:],
-			style=alicorn.layout_style(width=-1, height=alicorn.LAYOUT_SIZE_FIT_CONTENT), gap_x=8, gap_y=4,
-			label="history-commit-properties", layout_boundary=true)
-		author_label := alicorn.text(&ui, "Author", key=alicorn.key_string("history-property-author-label"))
-		_ = alicorn.grid_cell(&ui, author_label, 0, 0, align_y=.Baseline)
-		author_value := alicorn.text(&ui, fmt.tprintf("%s <%s>", commit.author_name, commit.author_email), key=alicorn.key_string("history-property-author-value"))
-		_ = alicorn.grid_cell(&ui, author_value, 0, 1, align_y=.Baseline)
-		commit_label := alicorn.text(&ui, "Commit", key=alicorn.key_string("history-property-commit-label"))
-		_ = alicorn.grid_cell(&ui, commit_label, 1, 0, align_y=.Baseline)
-		commit_value := alicorn.text(&ui, commit_short_id(commit), key=alicorn.key_string("history-property-commit-value"))
-		_ = alicorn.grid_cell(&ui, commit_value, 1, 1, align_y=.Baseline)
-		branch_label := alicorn.text(&ui, "Branch", key=alicorn.key_string("history-property-branch-label"))
-		_ = alicorn.grid_cell(&ui, branch_label, 2, 0, align_y=.Baseline)
-		branch_value := alicorn.text(&ui, app.branch, key=alicorn.key_string("history-property-branch-value"))
-		_ = alicorn.grid_cell(&ui, branch_value, 2, 1, align_y=.Baseline)
-		message_label := alicorn.text(&ui, "Message", key=alicorn.key_string("history-property-message-label"))
-		_ = alicorn.grid_cell(&ui, message_label, 3, 0, align_y=.Baseline)
-		message := commit.subject
-		if app.detail.id == app.selected_id && len(app.detail.subject) > 0 { message = app.detail.subject }
-		message_value := alicorn.text(&ui, message, key=alicorn.key_string("history-property-message-value"))
-		_ = alicorn.grid_cell(&ui, message_value, 3, 1, align_y=.Baseline)
-		alicorn.grid_end(&ui)
+		history_build_commit_metadata(ui, app, commit, metadata_presentation)
 		if app.detail_loading {
 			alicorn.text(&ui, "Loading commit details...", style=alicorn.layout_style(.Row, height=28))
 		} else if len(app.detail_error) > 0 {

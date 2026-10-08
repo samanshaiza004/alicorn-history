@@ -620,6 +620,40 @@ history_test_find_text_node :: proc(rt: ^alicorn.Runtime, value: string) -> alic
 	return 0
 }
 
+history_test_find_text_with_ancestor :: proc(rt: ^alicorn.Runtime, value: string, ancestor: alicorn.Node_ID) -> alicorn.Node_ID {
+	if rt == nil || ancestor == 0 { return 0 }
+	for id, node in rt.nodes {
+		if node.kind != .Text || node.text != value { continue }
+		current := node.parent
+		for depth := 0; current != 0 && depth < len(rt.nodes); depth += 1 {
+			if current == ancestor { return id }
+			parent, found := rt.nodes[current]
+			if !found { break }
+			current = parent.parent
+		}
+	}
+	return 0
+}
+
+history_test_semantic_press_actions_equal :: proc(a, b: alicorn.Semantic_Snapshot) -> bool {
+	a_count, b_count := 0, 0
+	for before in a.nodes {
+		if !alicorn.semantic_actions_has(before.actions, .Press) { continue }
+		a_count += 1
+		matched := false
+		for after in b.nodes {
+			if after.id != before.id { continue }
+			matched = after.role == before.role && after.actions == before.actions
+			break
+		}
+		if !matched { return false }
+	}
+	for after in b.nodes {
+		if alicorn.semantic_actions_has(after.actions, .Press) { b_count += 1 }
+	}
+	return a_count == b_count
+}
+
 history_test_detail_grid_resize :: proc(failures: ^int) {
 	app := history_app_new(".")
 	if app == nil {
@@ -668,17 +702,39 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 
 	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
 	defer alicorn.destroy_runtime(&rt)
-	widths := [3]int{1050, 1200, 1600}
-	for width in widths {
+	widths := [4]int{1200, 1200, 1050, 1200}
+	metadata_owner := alicorn.Node_ID(0)
+	focus_id := alicorn.Node_ID(0)
+	wide_metadata_bounds := alicorn.Rect{}
+	wide_grid_bounds := alicorn.Rect{}
+	wide_author_bounds := alicorn.Rect{}
+	wide_message_bounds := alicorn.Rect{}
+	semantic_before := alicorn.Semantic_Snapshot{}
+	semantic_before_valid := false
+	for width, width_index in widths {
+		incoming_width := history_detail_incoming_width(width, 722)
+		presentation := history_commit_metadata_presentation(incoming_width)
 		rt.viewport = alicorn.Rect{0, 0, f32(width), 800}
 		rt.invalidated = true
 		rt.layout_pending = true
 		_ = history_build(rawptr(app), &rt, width, 800, 1)
-		grid_id := alicorn.Node_ID(0)
-		for id, node in rt.nodes {
-			if node.label == "history-commit-properties" { grid_id = id; break }
+		if width_index == 1 {
+			focused := alicorn.focus(&rt, app.filter_node)
+			focus_id = alicorn.focused_node(&rt)
+			semantic_before = alicorn.semantic_snapshot(&rt)
+			semantic_before_valid = focused && focus_id != 0
 		}
-		grid_ok := grid_id != 0
+		metadata_id := alicorn.Node_ID(0)
+		grid_id := alicorn.Node_ID(0)
+		compact_id := alicorn.Node_ID(0)
+		for id, node in rt.nodes {
+			if node.label == "history-commit-properties" { metadata_id = id }
+			if node.label == "history-commit-properties-wide-grid" { grid_id = id }
+			if node.label == "history-commit-properties-compact" { compact_id = id }
+		}
+		if metadata_owner == 0 { metadata_owner = metadata_id }
+		owner_ok := metadata_id != 0 && metadata_id == metadata_owner
+		grid_ok := presentation == .Wide && grid_id != 0
 		if grid_ok {
 			grid := rt.nodes[grid_id]
 			max_bottom := grid.bounds.y
@@ -689,7 +745,26 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			}
 			grid_ok = grid.bounds.w > 0 && grid.bounds.h > 0 && max_bottom <= grid.bounds.y+grid.bounds.h+1
 		}
-		author_id := history_test_find_text_node(&rt, "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>")
+		compact_ok := presentation == .Compact && compact_id != 0
+		if compact_ok {
+			compact := rt.nodes[compact_id]
+			author_id := history_test_find_text_with_ancestor(&rt, "Alexandra Example With A Deliberately Long Author Display Name", compact_id)
+			commit_id := history_test_find_text_with_ancestor(&rt, "c6a9a556", compact_id)
+			message_id := history_test_find_text_with_ancestor(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible", compact_id)
+			branch_id := history_test_find_text_with_ancestor(&rt, "feature/responsive-grid-layout", compact_id)
+			compact_ok = author_id != 0 && commit_id != 0 && message_id != 0 && branch_id != 0
+			if compact_ok {
+				author, commit_text := rt.nodes[author_id], rt.nodes[commit_id]
+				message, branch := rt.nodes[message_id], rt.nodes[branch_id]
+				compact_ok = compact.bounds.w > 0 && compact.bounds.h > 0 &&
+					author.bounds.x < commit_text.bounds.x && author.bounds.w > 0 && commit_text.bounds.w > 0 &&
+					message.bounds.y >= compact.bounds.y && message.bounds.y+message.bounds.h <= compact.bounds.y+compact.bounds.h+1 &&
+					branch.bounds.y >= compact.bounds.y && branch.bounds.y+branch.bounds.h <= compact.bounds.y+compact.bounds.h+1
+			}
+		}
+		author_text := "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>"
+		if presentation == .Compact { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
+		author_id := history_test_find_text_node(&rt, author_text)
 		stats_id := history_test_find_text_node(&rt, "+24 -2")
 		file_name_id := history_test_find_text_node(&rt, first_path)
 		rows_ok := author_id != 0 && stats_id != 0 && file_name_id != 0
@@ -700,7 +775,42 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			rows_ok = author.bounds.w > 0 && stats.bounds.x >= 0 && file_name.bounds.w > 0 &&
 				stats.bounds.x+stats.bounds.w <= file_name.bounds.x+1
 		}
-		history_test_expect(failures, grid_ok && rows_ok, fmt.tprintf("wrapped commit metadata Grid and left-aligned file row remain bounded at %dpx window width", width))
+		mode_ok := (presentation == .Wide && grid_ok) || (presentation == .Compact && compact_ok)
+		history_test_expect(failures, owner_ok && mode_ok && rows_ok,
+			fmt.tprintf("adaptive commit metadata and left-aligned file row remain bounded at %dpx window width", width))
+		history_test_expect(failures, app.selected_id == commit.id && app.selected_file_path == first_path && app.selected_file_index == 0,
+			"adaptive presentation preserves selected commit and changed-file identity")
+		if width_index == 1 && presentation == .Wide && grid_ok && author_id != 0 {
+			wide_metadata_bounds = rt.nodes[metadata_id].bounds
+			wide_grid_bounds = rt.nodes[grid_id].bounds
+			wide_author_bounds = rt.nodes[author_id].bounds
+			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+			if message_id != 0 { wide_message_bounds = rt.nodes[message_id].bounds }
+		}
+		if presentation == .Compact {
+			before_press_actions := 0
+			for node in semantic_before.nodes {
+				if alicorn.semantic_actions_has(node.actions, .Press) { before_press_actions += 1 }
+			}
+			semantic_before_valid = semantic_before_valid && before_press_actions > 0
+			history_test_expect(failures, semantic_before_valid, "adaptive fixture captures existing semantic Press actions before switching")
+			history_test_expect(failures, focus_id != 0 && alicorn.focused_node(&rt) == focus_id,
+				"adaptive presentation preserves focus outside the metadata component")
+			after := alicorn.semantic_snapshot(&rt)
+			history_test_expect(failures, semantic_before_valid && history_test_semantic_press_actions_equal(semantic_before, after),
+				"adaptive presentation preserves semantic action identities")
+			alicorn.semantic_snapshot_destroy(&semantic_before)
+			alicorn.semantic_snapshot_destroy(&after)
+			semantic_before_valid = false
+		}
+		if width_index == 3 {
+			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+			replay_ok := presentation == .Wide && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
+				rt.nodes[metadata_id].bounds == wide_metadata_bounds && rt.nodes[grid_id].bounds == wide_grid_bounds &&
+				rt.nodes[author_id].bounds == wide_author_bounds && rt.nodes[message_id].bounds == wide_message_bounds
+			history_test_expect(failures, replay_ok,
+				"adaptive presentation deterministically replays the wide alternative when its incoming width returns")
+		}
 	}
 }
 
