@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:path/filepath"
 import "core:strings"
 import "core:sync/chan"
 import alicorn "vendor/alicorn/runtime"
@@ -56,17 +57,21 @@ History_App :: struct {
 
 history_app_new :: proc(repository: string) -> ^History_App {
 	app := new(History_App)
-	copy, err := strings.clone(repository)
-	if err != nil {
-		free(app)
-		return nil
-	}
-	app.repository = copy
+	app.repository = history_absolute_repository(repository)
+	if len(app.repository) == 0 { free(app); return nil }
 	app.selected_commit_index = -1
 	app.selected_file_index = -1
 	app.visible = make([dynamic]int, 0, 1024)
 	app.ref_rows = make([dynamic]Ref_List_Row, 0, 64)
 	return app
+}
+
+history_absolute_repository :: proc(repository: string) -> string {
+	absolute, err := filepath.abs(repository)
+	if err == nil { return absolute }
+	copy, clone_err := strings.clone(repository)
+	if clone_err != nil { return "" }
+	return copy
 }
 
 history_app_destroy :: proc(app: ^History_App) {
@@ -111,12 +116,8 @@ history_worker_submit_repository :: proc(app: ^History_App, repository: string) 
 	request := new(Git_Request)
 	request.history_id = app.next_history_id
 	request.kind = .Load_History
-	copy, err := strings.clone(repository)
-	if err != nil {
-		free(request)
-		return false
-	}
-	request.repository = copy
+	request.repository = history_absolute_repository(repository)
+	if len(request.repository) == 0 { free(request); return false }
 	if !git_worker_request(&app.worker, request) {
 		git_request_destroy(request)
 		return false

@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:path/filepath"
 import alicorn "vendor/alicorn/runtime"
 
 HISTORY_BG :: alicorn.Color{0.035, 0.045, 0.065, 1}
@@ -13,6 +14,7 @@ HISTORY_COMMIT_ROW_HEIGHT :: f32(44)
 HISTORY_FILE_ROW_HEIGHT   :: f32(32)
 HISTORY_PATCH_LINE_HEIGHT :: f32(22)
 HISTORY_REF_ROW_HEIGHT    :: f32(24)
+HISTORY_FILE_LIST_HEIGHT  :: f32(104)
 
 history_ref_heading :: proc(kind: Git_Ref_Kind) -> (label, key: string) {
 	#partial switch kind {
@@ -23,13 +25,19 @@ history_ref_heading :: proc(kind: Git_Ref_Kind) -> (label, key: string) {
 	return "", "history-refs-heading-unknown"
 }
 
-history_ref_badge_text :: proc(kind: Git_Ref_Kind) -> string {
+history_ref_marker_color :: proc(kind: Git_Ref_Kind) -> alicorn.Color {
 	#partial switch kind {
-	case .Branch: return "BRANCH"
-	case .Remote: return "REMOTE"
-	case .Tag:    return "TAG"
+	case .Branch: return alicorn.Color{0.30, 0.72, 0.52, 1}
+	case .Remote: return alicorn.Color{0.32, 0.66, 0.84, 1}
+	case .Tag:    return alicorn.Color{0.84, 0.66, 0.34, 1}
 	}
-	return "REF"
+	return alicorn.Color{0.55, 0.58, 0.64, 1}
+}
+
+history_repository_name :: proc(repository: string) -> string {
+	name := filepath.base(repository)
+	if len(name) == 0 || name == "." || name == "\\" || name == "/" { return repository }
+	return name
 }
 
 history_file_status_text :: proc(status: File_Status) -> string {
@@ -119,14 +127,24 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 
 	root_style := alicorn.layout_style(padding=12, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
-	alicorn.text(&ui, "Alicorn History", style=alicorn.layout_style(.Row, height=28), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 
 	status := "Loading history..."
 	if !app.loading {
 		if len(app.error_text) > 0 { status = fmt.tprintf("Git error: %s", app.error_text) }
-		else { status = fmt.tprintf("%s  ·  %d commits", app.branch, len(app.commits)) }
+		else { status = fmt.tprintf("%d commits", len(app.commits)) }
 	}
-	alicorn.text(&ui, fmt.tprintf("%s\n%s", app.repository, status), style=alicorn.layout_style(.Row, height=40))
+	alicorn.container_begin(&ui, .Container, label="history-repository-heading", style=alicorn.layout_style(.Row, height=32, gap=10, align=.Center))
+	alicorn.text(&ui, history_repository_name(app.repository), style=alicorn.layout_style(.Row, height=28, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+	if len(app.branch) > 0 {
+		alicorn.container_begin(&ui, .Container, label="history-current-branch", style=alicorn.layout_style(.Row, height=22, max_width=260, padding=6, align=.Center, clip=true), color=HEADER_BG)
+		alicorn.text(&ui, app.branch, style=alicorn.layout_style(.Row, height=18), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Ellipsis})
+		alicorn.container_end(&ui)
+	}
+	alicorn.text(&ui, status, style=alicorn.layout_style(.Row, height=22))
+	alicorn.container_end(&ui)
+	path_node := alicorn.text(&ui, app.repository, style=alicorn.layout_style(.Row, height=18), text_style=alicorn.Text_Style{overflow=.Ellipsis})
+	path_span := [1]alicorn.Text_Paint_Span{{start=0, end=len(app.repository), color=alicorn.Color{0.56, 0.60, 0.68, 1}, color_set=true}}
+	_ = alicorn.text_paint_spans(&ui, path_node, path_span[:])
 
 	alicorn.container_begin(&ui, .Container, label="history-actions", style=alicorn.layout_style(.Row, height=34, gap=8))
 	filter_style := alicorn.layout_style(.Row, height=34, grow=1)
@@ -203,17 +221,13 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			alicorn.visual_part_extension_id("app.history", "ref-row"))
 		alicorn.container_begin(&ui, .Container, label="history-ref-content",
 			key=alicorn.key_string("ref-content"),
-			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT-4, grow=1, gap=6, align=.Center, clip=true))
-		badge := alicorn.container_begin(&ui, .Container, label="history-ref-badge",
-			key=alicorn.key_string("ref-badge"),
-			style=alicorn.layout_style(.Row, width=58, height=18, padding=2, align=.Center, clip=true),
-			color=HEADER_BG)
-		_ = alicorn.visual_part_attach(&ui, badge, ref_button,
-			alicorn.visual_part_extension_id("app.history", "ref-badge"))
-		alicorn.text(&ui, history_ref_badge_text(ref.kind),
-			key=alicorn.key_string("ref-kind-label"),
-			style=alicorn.layout_style(.Row, height=14),
-			text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
+			style=alicorn.layout_style(.Row, height=HISTORY_REF_ROW_HEIGHT-4, grow=1, gap=8, align=.Center, clip=true))
+		marker := alicorn.container_begin(&ui, .Container, label="history-ref-marker",
+			key=alicorn.key_string("ref-marker"),
+			style=alicorn.layout_style(.Row, width=8, height=8, align=.Center),
+			color=history_ref_marker_color(ref.kind))
+		_ = alicorn.visual_part_attach(&ui, marker, ref_button,
+			alicorn.visual_part_extension_id("app.history", "ref-marker"))
 		alicorn.container_end(&ui)
 		alicorn.text(&ui, label,
 			key=alicorn.key_string("ref-name-label"),
@@ -321,7 +335,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		property_columns := [2]alicorn.Grid_Track{alicorn.grid_fixed(76), alicorn.grid_fraction(1)}
 		property_rows := [4]alicorn.Grid_Track{alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto(), alicorn.grid_auto()}
 		alicorn.grid_begin(&ui, alicorn.key_string("history-commit-properties"), property_columns[:], property_rows[:],
-			style=alicorn.layout_style(width=-1, height=104), gap_x=8, gap_y=4,
+			style=alicorn.layout_style(width=-1, height=alicorn.LAYOUT_SIZE_FIT_CONTENT), gap_x=8, gap_y=4,
 			label="history-commit-properties", layout_boundary=true)
 		author_label := alicorn.text(&ui, "Author", key=alicorn.key_string("history-property-author-label"))
 		_ = alicorn.grid_cell(&ui, author_label, 0, 0, align_y=.Baseline)
@@ -356,7 +370,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					len(app.detail.files),
 					HISTORY_FILE_ROW_HEIGHT,
 					key=alicorn.key_string("history-detail-files-scroll"),
-					style=alicorn.layout_style(height=132, clip=true),
+					style=alicorn.layout_style(height=HISTORY_FILE_LIST_HEIGHT, clip=true),
 					label="history-detail-files",
 					axes=.Vertical,
 				)
@@ -365,10 +379,39 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					if !alicorn.component_begin(&ui, alicorn.key_string(file.path)) { continue }
 					stats := history_file_stats_text(file)
 					selected_file := position == app.selected_file_index && file.path == app.selected_file_path
-					label := fmt.tprintf("%s  %-8s %s", history_file_status_text(file.status), stats, file.path)
 					row_weight := alicorn.FONT_WEIGHT_REGULAR
 					if selected_file { row_weight = alicorn.FONT_WEIGHT_MEDIUM }
-					clicked := alicorn.button(&ui, label, state=alicorn.Button_State{selected=selected_file}, style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=2), text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
+					file_row, clicked := alicorn.button_begin(
+						&ui,
+						"",
+						key=alicorn.key_string("history-file-row-button"),
+						state=alicorn.Button_State{selected=selected_file},
+						style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT, padding=0),
+						content_style=alicorn.button_content_style(.Start, padding_x=8, padding_y=2),
+					)
+					file_row_states := alicorn.Semantic_States{}
+					if selected_file { file_row_states = alicorn.semantic_states_add(file_row_states, .Selected) }
+					_ = alicorn.semantic_description(&ui, .Button,
+						fmt.tprintf("%s, %s, %s", history_file_status_text(file.status), stats, file.path),
+						states=file_row_states,
+						actions=alicorn.semantic_actions_add({}, .Press))
+					alicorn.container_begin(&ui, .Container, label="history-file-row-content",
+						key=alicorn.key_string("history-file-row-content"),
+						style=alicorn.layout_style(.Row, height=HISTORY_FILE_ROW_HEIGHT-4, grow=1, gap=10, align=.Center, clip=true))
+					alicorn.text(&ui, history_file_status_text(file.status),
+						key=alicorn.key_string("history-file-status"),
+						style=alicorn.layout_style(.Row, width=18, height=HISTORY_FILE_ROW_HEIGHT-4),
+						text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+					alicorn.text(&ui, stats,
+						key=alicorn.key_string("history-file-stats"),
+						style=alicorn.layout_style(.Row, width=82, height=HISTORY_FILE_ROW_HEIGHT-4),
+						text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+					alicorn.text(&ui, file.path,
+						key=alicorn.key_string("history-file-name"),
+						style=alicorn.layout_style(.Row, grow=1, height=HISTORY_FILE_ROW_HEIGHT-4),
+						text_style=alicorn.Text_Style{font_weight=row_weight, overflow=.Ellipsis})
+					alicorn.container_end(&ui)
+					alicorn.button_end(&ui)
 					if clicked {
 						if history_select_file_index(app, position) { file_selection_changed = true }
 					}
@@ -380,7 +423,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			if app.selected_file_index >= 0 && app.selected_file_index < len(app.detail.files) {
 				patch_title = fmt.tprintf("Patch: %s", app.selected_file_path)
 			}
-			alicorn.text(&ui, patch_title, style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
+			alicorn.text(&ui, patch_title, style=alicorn.layout_style(.Row, height=30), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 			if app.patch_loading {
 				alicorn.text(&ui, "Loading patch...", style=alicorn.layout_style(.Row, height=26))
 			} else if len(app.patch_error) > 0 {
@@ -424,7 +467,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				}
 				alicorn.virtual_list_end(&ui, patch_list)
 			} else if app.selected_file_index >= 0 {
-				alicorn.text(&ui, "No textual patch for this file", style=alicorn.layout_style(.Row, height=28))
+				file := app.detail.files[app.selected_file_index]
+				if file.additions > 0 || file.deletions > 0 {
+					alicorn.text(&ui, fmt.tprintf("Patch mismatch: Git reports %s lines, but the selected patch contains no hunks (commit %s).", history_file_stats_text(file), commit_short_id(commit)), style=alicorn.layout_style(.Row, height=28))
+				} else {
+					alicorn.text(&ui, "No textual patch for this file", style=alicorn.layout_style(.Row, height=28))
+				}
 			}
 		}
 	} else {
