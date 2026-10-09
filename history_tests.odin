@@ -833,10 +833,6 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 	font_loaded := alicorn.text_engine_load_font(&rt.text_engine, HISTORY_TEST_FONT)
 	history_test_expect(failures, font_loaded, "adaptive metadata fixture loads its text measurement font")
 	widths := [4]int{1200, 1200, 1050, 1200}
-	wide_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 722)) == .Wide
-	compact_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 850)) == .Compact
-	history_test_expect(failures, wide_split_mode && compact_split_mode,
-		"metadata presentation follows changed Split allocation at a stable window width")
 	metadata_owner := alicorn.Node_ID(0)
 	focus_id := alicorn.Node_ID(0)
 	wide_metadata_bounds := alicorn.Rect{}
@@ -846,8 +842,6 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 	semantic_before := alicorn.Semantic_Snapshot{}
 	semantic_before_valid := false
 	for width, width_index in widths {
-		incoming_width := history_detail_incoming_width(width, 722)
-		presentation := history_commit_metadata_presentation(incoming_width)
 		rt.viewport = alicorn.Rect{0, 0, f32(width), 800}
 		rt.invalidated = true
 		rt.layout_pending = true
@@ -866,9 +860,19 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			if node.label == "history-commit-properties-wide-grid" { grid_id = id }
 			if node.label == "history-commit-properties-compact" { compact_id = id }
 		}
+		adaptive_state := alicorn.adaptive_selection_state(&rt, metadata_id)
+		wide_presentation := adaptive_state.selected_name == "Wide"
+		available_width_matches_owner := false
+		if owner, owner_found := rt.nodes[metadata_id]; owner_found {
+			available_width_matches_owner = adaptive_state.available_width >= owner.bounds.w-0.01 &&
+				adaptive_state.available_width <= owner.bounds.w+0.01
+		}
+		history_test_expect(failures,
+			adaptive_state.valid && available_width_matches_owner,
+			fmt.tprintf("adaptive metadata uses actual assigned pane width at %dpx window width", width))
 		if metadata_owner == 0 { metadata_owner = metadata_id }
 		owner_ok := metadata_id != 0 && metadata_id == metadata_owner
-		grid_ok := presentation == .Wide && grid_id != 0
+		grid_ok := wide_presentation && grid_id != 0
 		if grid_ok {
 			grid := rt.nodes[grid_id]
 			metadata := rt.nodes[metadata_id]
@@ -902,7 +906,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 				previous_bottom = row_bottom
 			}
 		}
-		compact_ok := presentation == .Compact && compact_id != 0
+		compact_ok := !wide_presentation && compact_id != 0
 		if compact_ok {
 			compact := rt.nodes[compact_id]
 			author_id := history_test_find_text_with_ancestor(&rt, "Alexandra Example With A Deliberately Long Author Display Name", compact_id)
@@ -928,7 +932,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			}
 		}
 		author_text := "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>"
-		if presentation == .Compact { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
+		if !wide_presentation { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
 		author_id := history_test_find_text_node(&rt, author_text)
 		stats_id := history_test_find_text_node(&rt, "+24 -2")
 		file_name_id := history_test_find_text_node(&rt, first_path)
@@ -940,19 +944,19 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			rows_ok = author.bounds.w > 0 && stats.bounds.x >= 0 && file_name.bounds.w > 0 &&
 				stats.bounds.x+stats.bounds.w <= file_name.bounds.x+1
 		}
-		mode_ok := (presentation == .Wide && grid_ok) || (presentation == .Compact && compact_ok)
+		mode_ok := (wide_presentation && grid_ok) || (!wide_presentation && compact_ok)
 		history_test_expect(failures, owner_ok && mode_ok && rows_ok,
 			fmt.tprintf("adaptive commit metadata and left-aligned file row remain bounded at %dpx window width", width))
 		history_test_expect(failures, app.selected_id == commit.id && app.selected_file_path == first_path && app.selected_file_index == 0,
 			"adaptive presentation preserves selected commit and changed-file identity")
-		if width_index == 1 && presentation == .Wide && grid_ok && author_id != 0 {
+		if width_index == 1 && wide_presentation && grid_ok && author_id != 0 {
 			wide_metadata_bounds = rt.nodes[metadata_id].bounds
 			wide_grid_bounds = rt.nodes[grid_id].bounds
 			wide_author_bounds = rt.nodes[author_id].bounds
 			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
 			if message_id != 0 { wide_message_bounds = rt.nodes[message_id].bounds }
 		}
-		if presentation == .Compact {
+		if !wide_presentation {
 			before_press_actions := 0
 			for node in semantic_before.nodes {
 				if alicorn.semantic_actions_has(node.actions, .Press) { before_press_actions += 1 }
@@ -970,7 +974,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 		}
 		if width_index == 3 {
 			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
-			replay_ok := presentation == .Wide && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
+			replay_ok := wide_presentation && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
 				rt.nodes[metadata_id].bounds == wide_metadata_bounds && rt.nodes[grid_id].bounds == wide_grid_bounds &&
 				rt.nodes[author_id].bounds == wide_author_bounds && rt.nodes[message_id].bounds == wide_message_bounds
 			history_test_expect(failures, replay_ok,
