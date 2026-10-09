@@ -27,6 +27,34 @@ HISTORY_METADATA_WIDE_MIN_WIDTH :: f32(380)
 HISTORY_METADATA_ROW_HEIGHT :: f32(26)
 HISTORY_METADATA_ROW_GAP :: f32(4)
 HISTORY_METADATA_GRID_HEIGHT :: f32(4*HISTORY_METADATA_ROW_HEIGHT + 3*HISTORY_METADATA_ROW_GAP)
+HISTORY_HUNK_TOOLBAR_WIDE_MIN_WIDTH :: f32(420)
+HISTORY_HUNK_PREVIOUS_ACTION_ID :: alicorn.Semantic_ID{namespace=0x484953544F5259, value=1}
+HISTORY_HUNK_NEXT_ACTION_ID :: alicorn.Semantic_ID{namespace=0x484953544F5259, value=2}
+
+history_hunk_navigation_button :: proc(
+	ui: ^alicorn.UI,
+	label, key, semantic_label: string,
+	width: f32,
+	disabled: bool,
+	semantic_id: alicorn.Semantic_ID,
+) -> (id: alicorn.Node_ID, clicked: bool) {
+	id, clicked = alicorn.button_begin(
+		ui,
+		label,
+		key=alicorn.key_string(key),
+		state=alicorn.Button_State{disabled=disabled},
+		style=alicorn.layout_style(.Row, width=width, height=28),
+	)
+	_ = alicorn.semantic_describe_as(
+		ui,
+		semantic_id,
+		.Button,
+		semantic_label,
+		actions=alicorn.semantic_actions_add({}, .Press),
+	)
+	alicorn.button_end(ui)
+	return
+}
 
 history_build_commit_metadata :: proc(ui_value: alicorn.UI, app: ^History_App, commit: Commit) {
 	ui := ui_value
@@ -561,31 +589,55 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				hunk_count := len(app.patch.hunks)
 				if hunk_count > 0 {
 					if app.selected_patch_hunk >= hunk_count { app.selected_patch_hunk = hunk_count-1 }
-					alicorn.container_begin(&ui, .Container, label="history-patch-hunk-navigation", style=alicorn.layout_style(.Row, height=30, gap=8, align=.Center))
-					_, previous_hunk_clicked := alicorn.button_begin(
-						&ui,
-						"‹ Previous",
-						key=alicorn.key_string("history-patch-previous-hunk"),
-						state=alicorn.Button_State{disabled=app.selected_patch_hunk <= 0},
-						style=alicorn.layout_style(.Row, width=84, height=28),
-					)
-					alicorn.button_end(&ui)
+					previous_hunk_clicked := false
+					next_hunk_clicked := false
+					alicorn.adaptive_begin(&ui,
+						alicorn.key_string("history-patch-hunk-navigation"),
+						style=alicorn.layout_style(.Row, height=30),
+						label="history-patch-hunk-navigation")
+					alicorn.adaptive_alternative_begin(&ui,
+						alicorn.key_string("history-patch-hunk-navigation-wide"),
+						"Wide",
+						minimum_width=HISTORY_HUNK_TOOLBAR_WIDE_MIN_WIDTH,
+						style=alicorn.layout_style(.Row, gap=8, align=.Center))
+					_, previous_clicked := history_hunk_navigation_button(
+						&ui, "‹ Previous Hunk", "history-patch-previous-hunk-wide", "Previous hunk",
+						132, app.selected_patch_hunk <= 0, HISTORY_HUNK_PREVIOUS_ACTION_ID)
+					previous_hunk_clicked = previous_hunk_clicked || previous_clicked
+					alicorn.text(&ui, fmt.tprintf("Hunk %d / %d", app.selected_patch_hunk+1, hunk_count),
+						style=alicorn.layout_style(.Row, height=26, grow=1, align=.Center),
+						text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+					_, next_clicked := history_hunk_navigation_button(
+						&ui, "Next Hunk ›", "history-patch-next-hunk-wide", "Next hunk",
+						132, app.selected_patch_hunk+1 >= hunk_count, HISTORY_HUNK_NEXT_ACTION_ID)
+					next_hunk_clicked = next_hunk_clicked || next_clicked
+					alicorn.adaptive_alternative_end(&ui)
+
+					alicorn.adaptive_alternative_begin(&ui,
+						alicorn.key_string("history-patch-hunk-navigation-compact"),
+						"Compact",
+						minimum_width=0,
+						style=alicorn.layout_style(.Row, gap=8, align=.Center))
+					_, previous_clicked = history_hunk_navigation_button(
+						&ui, "‹", "history-patch-previous-hunk-compact", "Previous hunk",
+						42, app.selected_patch_hunk <= 0, HISTORY_HUNK_PREVIOUS_ACTION_ID)
+					previous_hunk_clicked = previous_hunk_clicked || previous_clicked
+					alicorn.text(&ui, fmt.tprintf("%d / %d", app.selected_patch_hunk+1, hunk_count),
+						style=alicorn.layout_style(.Row, width=72, height=26, align=.Center),
+						text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+					_, next_clicked = history_hunk_navigation_button(
+						&ui, "›", "history-patch-next-hunk-compact", "Next hunk",
+						42, app.selected_patch_hunk+1 >= hunk_count, HISTORY_HUNK_NEXT_ACTION_ID)
+					next_hunk_clicked = next_hunk_clicked || next_clicked
+					alicorn.adaptive_alternative_end(&ui)
+					alicorn.adaptive_end(&ui)
+
 					if previous_hunk_clicked {
 						app.selected_patch_hunk, patch_hunk_changed = history_patch_hunk_step(hunk_count, app.selected_patch_hunk, -1)
 					}
-					alicorn.text(&ui, fmt.tprintf("Hunk %d / %d", app.selected_patch_hunk+1, hunk_count), style=alicorn.layout_style(.Row, height=26, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
-					_, next_hunk_clicked := alicorn.button_begin(
-						&ui,
-						"Next ›",
-						key=alicorn.key_string("history-patch-next-hunk"),
-						state=alicorn.Button_State{disabled=app.selected_patch_hunk+1 >= hunk_count},
-						style=alicorn.layout_style(.Row, width=84, height=28),
-					)
-					alicorn.button_end(&ui)
 					if next_hunk_clicked {
 						app.selected_patch_hunk, patch_hunk_changed = history_patch_hunk_step(hunk_count, app.selected_patch_hunk, 1)
 					}
-					alicorn.container_end(&ui)
 					if patch_hunk_changed {
 						patch_hunk_scroll_target = history_patch_hunk_display_index(app.patch, app.selected_patch_hunk)
 					}
