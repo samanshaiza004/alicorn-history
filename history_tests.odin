@@ -820,12 +820,15 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 	app.selected_file_index = 0
 	app.selected_file_path, _ = strings.clone(first_path)
 	app.patch.path, _ = strings.clone(first_path)
-	app.patch.hunks = make([dynamic]Diff_Hunk, 0, 1)
-	header, _ := strings.clone("@@ -318,2 +318,5 @@ history_build")
-	lines := make([dynamic]Diff_Line, 0, 1)
-	line_text, _ := strings.clone("alicorn.grid_begin(&ui, alicorn.key_string(\"history-commit-properties\"), ...) ")
-	append(&lines, Diff_Line{kind=.Addition, new_line=318, text=line_text})
-	append(&app.patch.hunks, Diff_Hunk{old_start=318, old_count=2, new_start=318, new_count=5, header=header, lines=lines})
+	app.patch.hunks = make([dynamic]Diff_Hunk, 0, 3)
+	for index in 0..<3 {
+		line_number := 318+index*20
+		header, _ := strings.clone(fmt.tprintf("@@ -%d,2 +%d,5 @@ history_build hunk %d", line_number, line_number, index+1))
+		lines := make([dynamic]Diff_Line, 0, 1)
+		line_text, _ := strings.clone("alicorn.grid_begin(&ui, alicorn.key_string(\"history-commit-properties\"), ...) ")
+		append(&lines, Diff_Line{kind=.Addition, new_line=line_number, text=line_text})
+		append(&app.patch.hunks, Diff_Hunk{old_start=line_number, old_count=2, new_start=line_number, new_count=5, header=header, lines=lines})
+	}
 	history_patch_prepare_display(&app.patch)
 
 	rt := alicorn.new_runtime(alicorn.Rect{0, 0, 1200, 800})
@@ -833,11 +836,10 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 	font_loaded := alicorn.text_engine_load_font(&rt.text_engine, HISTORY_TEST_FONT)
 	history_test_expect(failures, font_loaded, "adaptive metadata fixture loads its text measurement font")
 	widths := [4]int{1200, 1200, 1050, 1200}
-	wide_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 722)) == .Wide
-	compact_split_mode := history_commit_metadata_presentation(history_detail_incoming_width(1200, 850)) == .Compact
-	history_test_expect(failures, wide_split_mode && compact_split_mode,
-		"metadata presentation follows changed Split allocation at a stable window width")
 	metadata_owner := alicorn.Node_ID(0)
+	hunk_toolbar_owner := alicorn.Node_ID(0)
+	wide_next_action_node := alicorn.Node_ID(0)
+	compact_next_action_node := alicorn.Node_ID(0)
 	focus_id := alicorn.Node_ID(0)
 	wide_metadata_bounds := alicorn.Rect{}
 	wide_grid_bounds := alicorn.Rect{}
@@ -846,14 +848,14 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 	semantic_before := alicorn.Semantic_Snapshot{}
 	semantic_before_valid := false
 	for width, width_index in widths {
-		incoming_width := history_detail_incoming_width(width, 722)
-		presentation := history_commit_metadata_presentation(incoming_width)
 		rt.viewport = alicorn.Rect{0, 0, f32(width), 800}
 		rt.invalidated = true
 		rt.layout_pending = true
 		_ = history_build(rawptr(app), &rt, width, 800, 1)
 		if width_index == 1 {
-			focused := alicorn.focus(&rt, app.filter_node)
+			wide_next_action, action_found := alicorn.semantic_node_lookup(&rt, HISTORY_HUNK_NEXT_ACTION_ID)
+			wide_next_action_node = wide_next_action.visual_node
+			focused := action_found && wide_next_action_node != 0 && alicorn.focus(&rt, wide_next_action_node)
 			focus_id = alicorn.focused_node(&rt)
 			semantic_before = alicorn.semantic_snapshot(&rt)
 			semantic_before_valid = focused && focus_id != 0
@@ -866,9 +868,47 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			if node.label == "history-commit-properties-wide-grid" { grid_id = id }
 			if node.label == "history-commit-properties-compact" { compact_id = id }
 		}
+		adaptive_state := alicorn.adaptive_selection_state(&rt, metadata_id)
+		wide_presentation := adaptive_state.selected_name == "Wide"
+		hunk_toolbar_owner = 0
+		for id, node in rt.nodes {
+			if node.label == "history-patch-hunk-navigation" { hunk_toolbar_owner = id; break }
+		}
+		hunk_toolbar_state := alicorn.adaptive_selection_state(&rt, hunk_toolbar_owner)
+		if width_index == 1 {
+			history_test_expect(failures, hunk_toolbar_owner != 0 && hunk_toolbar_state.selected_name == "Wide" &&
+				wide_next_action_node != 0,
+				"wide patch toolbar exposes the stable Next Hunk semantic action")
+		}
+		if width_index == 2 {
+			compact_next_action, compact_action_found := alicorn.semantic_node_lookup(&rt, HISTORY_HUNK_NEXT_ACTION_ID)
+			compact_next_action_node = compact_next_action.visual_node
+			history_test_expect(failures, hunk_toolbar_state.valid && hunk_toolbar_state.selected_name == "Compact" &&
+				compact_action_found && compact_next_action_node != 0 && compact_next_action_node != wide_next_action_node &&
+				alicorn.focused_node(&rt) == compact_next_action_node,
+				"narrowing the assigned pane moves keyboard focus and semantic identity to the compact Next Hunk action")
+			action_builds_before := app.build_count
+			action_queued := alicorn.semantic_action_request(&rt, HISTORY_HUNK_NEXT_ACTION_ID, .Press)
+			if action_queued { _ = history_build(rawptr(app), &rt, width, 800, 1) }
+			history_test_expect(failures, action_queued && app.selected_patch_hunk == 1 &&
+				app.build_count == action_builds_before+1 && rt.activation_node == 0,
+				"pressing the compact Next Hunk semantic action advances exactly one hunk")
+			alicorn.invalidate_root(&rt, "verify adaptive hunk action is consumed once")
+			_ = history_build(rawptr(app), &rt, width, 800, 1)
+			history_test_expect(failures, app.selected_patch_hunk == 1,
+				"a later description does not repeat the consumed Next Hunk action")
+		}
+		available_width_matches_owner := false
+		if owner, owner_found := rt.nodes[metadata_id]; owner_found {
+			available_width_matches_owner = adaptive_state.available_width >= owner.bounds.w-0.01 &&
+				adaptive_state.available_width <= owner.bounds.w+0.01
+		}
+		history_test_expect(failures,
+			adaptive_state.valid && available_width_matches_owner,
+			fmt.tprintf("adaptive metadata uses actual assigned pane width at %dpx window width", width))
 		if metadata_owner == 0 { metadata_owner = metadata_id }
 		owner_ok := metadata_id != 0 && metadata_id == metadata_owner
-		grid_ok := presentation == .Wide && grid_id != 0
+		grid_ok := wide_presentation && grid_id != 0
 		if grid_ok {
 			grid := rt.nodes[grid_id]
 			metadata := rt.nodes[metadata_id]
@@ -902,7 +942,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 				previous_bottom = row_bottom
 			}
 		}
-		compact_ok := presentation == .Compact && compact_id != 0
+		compact_ok := !wide_presentation && compact_id != 0
 		if compact_ok {
 			compact := rt.nodes[compact_id]
 			author_id := history_test_find_text_with_ancestor(&rt, "Alexandra Example With A Deliberately Long Author Display Name", compact_id)
@@ -928,7 +968,7 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			}
 		}
 		author_text := "Alexandra Example With A Deliberately Long Author Display Name <alexandra.example.with.a.long.address@example.invalid>"
-		if presentation == .Compact { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
+		if !wide_presentation { author_text = "Alexandra Example With A Deliberately Long Author Display Name" }
 		author_id := history_test_find_text_node(&rt, author_text)
 		stats_id := history_test_find_text_node(&rt, "+24 -2")
 		file_name_id := history_test_find_text_node(&rt, first_path)
@@ -940,27 +980,35 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			rows_ok = author.bounds.w > 0 && stats.bounds.x >= 0 && file_name.bounds.w > 0 &&
 				stats.bounds.x+stats.bounds.w <= file_name.bounds.x+1
 		}
-		mode_ok := (presentation == .Wide && grid_ok) || (presentation == .Compact && compact_ok)
+		mode_ok := (wide_presentation && grid_ok) || (!wide_presentation && compact_ok)
 		history_test_expect(failures, owner_ok && mode_ok && rows_ok,
 			fmt.tprintf("adaptive commit metadata and left-aligned file row remain bounded at %dpx window width", width))
 		history_test_expect(failures, app.selected_id == commit.id && app.selected_file_path == first_path && app.selected_file_index == 0,
 			"adaptive presentation preserves selected commit and changed-file identity")
-		if width_index == 1 && presentation == .Wide && grid_ok && author_id != 0 {
+		if width_index == 1 && wide_presentation && grid_ok && author_id != 0 {
 			wide_metadata_bounds = rt.nodes[metadata_id].bounds
 			wide_grid_bounds = rt.nodes[grid_id].bounds
 			wide_author_bounds = rt.nodes[author_id].bounds
-			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
+			message_id := history_test_find_grid_text(&rt,
+				"Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible",
+				grid_id, 3, 1)
 			if message_id != 0 { wide_message_bounds = rt.nodes[message_id].bounds }
 		}
-		if presentation == .Compact {
+		if !wide_presentation {
 			before_press_actions := 0
 			for node in semantic_before.nodes {
 				if alicorn.semantic_actions_has(node.actions, .Press) { before_press_actions += 1 }
 			}
 			semantic_before_valid = semantic_before_valid && before_press_actions > 0
 			history_test_expect(failures, semantic_before_valid, "adaptive fixture captures existing semantic Press actions before switching")
-			history_test_expect(failures, focus_id != 0 && alicorn.focused_node(&rt) == focus_id,
-				"adaptive presentation preserves focus outside the metadata component")
+			focus_preserved := false
+			if width_index == 2 {
+				focus_preserved = compact_next_action_node != 0 && alicorn.focused_node(&rt) == compact_next_action_node
+			} else {
+				focus_preserved = focus_id != 0 && alicorn.focused_node(&rt) == focus_id
+			}
+			history_test_expect(failures, focus_preserved,
+				"adaptive metadata switching preserves focus on the separate hunk toolbar")
 			after := alicorn.semantic_snapshot(&rt)
 			history_test_expect(failures, semantic_before_valid && history_test_semantic_press_actions_equal(semantic_before, after),
 				"adaptive presentation preserves semantic action identities")
@@ -969,8 +1017,15 @@ history_test_detail_grid_resize :: proc(failures: ^int) {
 			semantic_before_valid = false
 		}
 		if width_index == 3 {
-			message_id := history_test_find_text_node(&rt, "Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible")
-			replay_ok := presentation == .Wide && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
+			restored_next_action, restored_action_found := alicorn.semantic_node_lookup(&rt, HISTORY_HUNK_NEXT_ACTION_ID)
+			history_test_expect(failures, hunk_toolbar_state.valid && hunk_toolbar_state.selected_name == "Wide" &&
+				restored_action_found && restored_next_action.visual_node == wide_next_action_node &&
+				alicorn.focused_node(&rt) == wide_next_action_node,
+				"restoring the wide pane returns focus to the original semantic Next Hunk control")
+			message_id := history_test_find_grid_text(&rt,
+				"Exercise the Grid with a wrapped message while keeping its baselines and the diff pane visible",
+				grid_id, 3, 1)
+			replay_ok := wide_presentation && metadata_id != 0 && grid_id != 0 && author_id != 0 && message_id != 0 &&
 				rt.nodes[metadata_id].bounds == wide_metadata_bounds && rt.nodes[grid_id].bounds == wide_grid_bounds &&
 				rt.nodes[author_id].bounds == wide_author_bounds && rt.nodes[message_id].bounds == wide_message_bounds
 			history_test_expect(failures, replay_ok,
