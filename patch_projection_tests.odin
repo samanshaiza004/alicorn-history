@@ -2,10 +2,20 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import alicorn "vendor/alicorn/runtime"
 
 HISTORY_FOLD_REAL_PATCH :: #load("research/fixtures/history-scroll.patch", string)
+
+Patch_Projection_Fixture :: struct {
+	name: string,
+	data: string,
+	path: string,
+	minimum_rows: int,
+	minimum_hunks: int,
+}
 
 history_fold_large_fixture :: proc() -> string {
 	b: strings.Builder
@@ -17,21 +27,47 @@ history_fold_large_fixture :: proc() -> string {
 	copy, _ := strings.clone(strings.to_string(b))
 	return copy
 }
-history_test_patch_projection :: proc(failures: ^int) {
+history_test_patch_projection :: proc(failures: ^int, repository: string) {
 	large := history_fold_large_fixture()
 	defer delete(large)
-	fixtures := [?]string{HISTORY_FOLD_REAL_PATCH, large, "@@ -0,0 +1,2 @@\n+a\n+b\n@@ -4,2 +5,0 @@\n-c\n-d\n", "Binary files a/p.png and b/p.png differ\n", ""}
+	fixtures := [?]Patch_Projection_Fixture{
+		{"History scroll fixture", HISTORY_FOLD_REAL_PATCH, "", 0, 0},
+		{"Alternating synthetic fixture", large, "", 0, 0},
+		{"Alicorn large file replacement", "", "research/fixtures/alicorn-main-large-replacement.patch", 3000, 1},
+		{"Alicorn caption rewrite", "", "research/fixtures/alicorn-caption-rewrite.patch", 300, 1},
+		{"Alicorn many-hunk update", "", "research/fixtures/alicorn-theme-many-hunks.patch", 1, 8},
+		{"Zero-count insertion and deletion", "@@ -0,0 +1,2 @@\n+a\n+b\n@@ -4,2 +5,0 @@\n-c\n-d\n", "", 0, 0},
+		{"Binary patch", "Binary files a/p.png and b/p.png differ\n", "", 0, 0},
+		{"Empty patch", "", "", 0, 0},
+	}
 	for fixture in fixtures {
-		patch, err := git_parse_patch(transmute([]byte)fixture)
+		fixture_bytes: []byte
+		if len(fixture.path) > 0 {
+			fixture_path, path_error := filepath.join({repository, fixture.path}, context.allocator)
+			history_test_expect(failures, path_error == nil, "large real patch fixture path resolves")
+			if path_error != nil { continue }
+			read_bytes, read_error := os.read_entire_file_from_path(fixture_path, context.allocator)
+			delete(fixture_path)
+			history_test_expect(failures, read_error == nil, "large real patch fixture is readable")
+			if read_error != nil { continue }
+			fixture_bytes = read_bytes
+		} else {
+			fixture_bytes = transmute([]byte)fixture.data
+		}
+		fixture_size := len(fixture_bytes)
+		patch, err := git_parse_patch(fixture_bytes)
+		if len(fixture.path) > 0 { delete(fixture_bytes) }
 		defer file_patch_destroy(&patch)
 		history_test_expect(failures, len(err) == 0, "folding fixture uses the actual History parser")
 		if len(err) > 0 { delete(err); continue }
+		history_test_expect(failures, len(patch.display_lines) >= fixture.minimum_rows && len(patch.hunks) >= fixture.minimum_hunks, "real patch corpus covers its recorded size and hunk shape")
 		tracker: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&tracker, context.allocator)
 		p: Patch_Projection
 		ok := patch_projection_init(&p, &patch, Patch_Request_ID(10), mem.tracking_allocator(&tracker))
 		history_test_expect(failures, ok, "typed binary block projection builds")
 		if !ok { mem.tracking_allocator_destroy(&tracker); continue }
+		fmt.println("History patch corpus:", fixture.name, "bytes", fixture_size, "hunks", len(patch.hunks), "display rows", len(patch.display_lines), "spans", len(p.spans))
 		original := patch_projection_measure(&p)
 		viewport := make([]Patch_Projection_Row, len(patch.display_lines))
 		written := patch_projection_viewport(&p, Patch_Display_Row(0), viewport)

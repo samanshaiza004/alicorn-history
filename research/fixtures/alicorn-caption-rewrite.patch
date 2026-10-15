@@ -1,0 +1,569 @@
+diff --git a/native/sdl_gpu/menus_windows.odin b/native/sdl_gpu/menus_windows.odin
+index cfea5f7..db41c88 100644
+--- a/native/sdl_gpu/menus_windows.odin
++++ b/native/sdl_gpu/menus_windows.odin
+@@ -57,6 +57,7 @@ Win32_Menu_Label :: struct {
+ }
+ 
+ Win32_Caption_Control :: struct {
++	// Client-relative physical pixels, shared by paint and WM_NCHITTEST.
+ 	bounds: win.RECT,
+ 	hit_test: win.LRESULT,
+ }
+@@ -83,12 +84,21 @@ Win32_Menu_State :: struct {
+ 	active_menu: int,
+ 	menu_mode: bool,
+ 	chrome_height: f32,
++	chrome_height_pixels: i32,
++	pixels_per_unit: f32,
++	maximized: bool,
++	windows_11: bool,
+ 	caption_button_bounds: win.RECT,
+ 	caption_button_bounds_valid: bool,
+ 	caption_controls: [3]Win32_Caption_Control,
+ 	caption_hovered: int,
+ 	caption_pressed: int,
+-	close_glyph_host_node: alicorn.Node_ID,
++	caption_masks: [4]Win32_Caption_Mask,
++	caption_mask_dpi: u32,
++	caption_mask_windows_11: bool,
++	caption_mask_builds: u64,
++	text_scale: f32,
++	ellipsis_host_node: alicorn.Node_ID,
+ 	high_contrast: bool,
+ 	dpi:        u32,
+ 	installed:  bool,
+@@ -205,21 +215,17 @@ win32_menu_label_at_window_point :: proc(state: ^Win32_Menu_State, x, y: i32) ->
+ 	return -1
+ }
+ 
+-// Win32 sends screen coordinates even for nonclient hit testing. Convert using
+-// the client origin so this also works for maximized windows and monitors whose
+-// desktop coordinates are negative.
+-win32_screen_point_to_window_logical :: proc(screen_x, screen_y, client_origin_x, client_origin_y: i32, dpi: u32) -> (f32, f32) {
+-	effective_dpi := dpi if dpi != 0 else 96
+-	logical_per_pixel := 96.0/f32(effective_dpi)
+-	return f32(screen_x-client_origin_x)*logical_per_pixel, f32(screen_y-client_origin_y)*logical_per_pixel
++// Win32 hit testing and menu placement stay in client-relative physical pixels.
++// In particular, fractional DPI must not round a one-pixel resize strip away.
++win32_screen_point_to_client_pixels :: proc(screen_x, screen_y, client_origin_x, client_origin_y: i32) -> (i32, i32) {
++	return screen_x-client_origin_x, screen_y-client_origin_y
+ }
+ 
+ win32_menu_screen_point_to_window :: proc(state: ^Win32_Menu_State, x, y: i32) -> (i32, i32, bool) {
+ 	client_origin := win.POINT{}
+ 	if !win.ClientToScreen(state.hwnd, &client_origin) { return 0, 0, false }
+-	dpi := win.GetDpiForWindow(state.hwnd)
+-	logical_x, logical_y := win32_screen_point_to_window_logical(x, y, i32(client_origin.x), i32(client_origin.y), dpi)
+-	return i32(logical_x), i32(logical_y), true
++	client_x, client_y := win32_screen_point_to_client_pixels(x, y, i32(client_origin.x), i32(client_origin.y))
++	return client_x, client_y, true
+ }
+ 
+ win32_menu_client_point_to_window :: proc(state: ^Win32_Menu_State, point: ^win.POINT) -> bool {
+@@ -290,23 +296,7 @@ win32_caption_control_at :: proc(x, y: i32, controls: []Win32_Caption_Control) -
+ 	return -1
+ }
+ 
+-// DWM reports caption controls relative to the outer window in physical pixels.
+-// The compositor and label layout use client-relative logical coordinates.
+-win32_caption_bounds_to_client_logical :: proc(
+-	window_bounds, window_rect: win.RECT,
+-	client_origin_x, client_origin_y: i32,
+-	dpi: u32,
+-) -> win.RECT {
+-	logical_per_pixel := 96.0/f32(dpi if dpi != 0 else 96)
+-	return win.RECT{
+-		left=win.LONG(f32(i32(window_bounds.left)+i32(window_rect.left)-client_origin_x)*logical_per_pixel),
+-		top=win.LONG(f32(i32(window_bounds.top)+i32(window_rect.top)-client_origin_y)*logical_per_pixel),
+-		right=win.LONG(f32(i32(window_bounds.right)+i32(window_rect.left)-client_origin_x)*logical_per_pixel),
+-		bottom=win.LONG(f32(i32(window_bounds.bottom)+i32(window_rect.top)-client_origin_y)*logical_per_pixel),
+-	}
+-}
+-
+-win32_menu_update_caption_button_bounds :: proc(state: ^Win32_Menu_State, logical_client_width: f32) -> bool {
++win32_menu_update_caption_button_bounds :: proc(state: ^Win32_Menu_State, client_width_pixels: i32) -> bool {
+ 	if state == nil || state.hwnd == nil { return false }
+ 	state.caption_button_bounds_valid = false
+ 	window_bounds: win.RECT
+@@ -316,35 +306,21 @@ win32_menu_update_caption_button_bounds :: proc(state: ^Win32_Menu_State, logica
+ 	window_rect: win.RECT
+ 	client_origin := win.POINT{}
+ 	if !win.GetWindowRect(state.hwnd, &window_rect) || !win.ClientToScreen(state.hwnd, &client_origin) { return false }
+-	bounds := win32_caption_bounds_to_client_logical(
++	bounds := win32_caption_bounds_to_client_pixels(
+ 		window_bounds,
+ 		window_rect,
+ 		i32(client_origin.x),
+ 		i32(client_origin.y),
+-		state.dpi,
+ 	)
+-	button_width := f32(bounds.right-bounds.left)
+-	if bounds.right <= bounds.left || button_width > min(logical_client_width*0.5, 320) { return false }
+-	if bounds.left < 0 || f32(bounds.right) > logical_client_width+1 { return false }
++	button_width := i32(bounds.right-bounds.left)
++	if bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
++		button_width > i32(native_pixel_edge(320, f32(state.dpi)/96)) { return false }
++	if bounds.left < 0 || bounds.left >= win.LONG(client_width_pixels) { return false }
+ 	state.caption_button_bounds = bounds
+ 	state.caption_button_bounds_valid = true
+ 	return true
+ }
+ 
+-win32_menu_layout_caption_controls :: proc(state: ^Win32_Menu_State) {
+-	if state == nil { return }
+-	rects := win32_caption_control_rects(state.caption_button_bounds, state.caption_button_bounds_valid)
+-	hit_tests := [3]win.LRESULT{
+-		win.LRESULT(win.HTMINBUTTON),
+-		win.LRESULT(win.HTMAXBUTTON),
+-		win.LRESULT(win.HTCLOSE),
+-	}
+-	for index in 0..<len(state.caption_controls) {
+-		state.caption_controls[index].bounds = rects[index]
+-		state.caption_controls[index].hit_test = hit_tests[index]
+-	}
+-}
+-
+ win32_menu_frame_hit_test :: proc(state: ^Win32_Menu_State, screen_x, screen_y: i32) -> win.LRESULT {
+ 	if state == nil || !state.frame_enabled { return win.LRESULT(win.HTCLIENT) }
+ 	client_rect: win.RECT
+@@ -353,18 +329,16 @@ win32_menu_frame_hit_test :: proc(state: ^Win32_Menu_State, screen_x, screen_y:
+ 	if !win.ClientToScreen(state.hwnd, &client_origin) { return win.LRESULT(win.HTCLIENT) }
+ 	dpi := win.GetDpiForWindow(state.hwnd)
+ 	if dpi == 0 { dpi = 96 }
+-	to_logical := 96.0/f32(dpi)
+-	logical_x, logical_y := win32_screen_point_to_window_logical(screen_x, screen_y, i32(client_origin.x), i32(client_origin.y), dpi)
+-	x, y := i32(logical_x), i32(logical_y)
+-	width := i32(f32(client_rect.right-client_rect.left)*to_logical)
+-	height := i32(f32(client_rect.bottom-client_rect.top)*to_logical)
+-	resize_x := i32(f32(win.GetSystemMetricsForDpi(win.SM_CXSIZEFRAME, dpi)+win.GetSystemMetricsForDpi(win.SM_CXPADDEDBORDER, dpi))*to_logical)
+-	resize_y := i32(f32(win.GetSystemMetricsForDpi(win.SM_CYSIZEFRAME, dpi)+win.GetSystemMetricsForDpi(win.SM_CXPADDEDBORDER, dpi))*to_logical)
++	x, y := win32_screen_point_to_client_pixels(screen_x, screen_y, i32(client_origin.x), i32(client_origin.y))
++	width := i32(client_rect.right-client_rect.left)
++	height := i32(client_rect.bottom-client_rect.top)
++	resize_x := i32(win.GetSystemMetricsForDpi(win.SM_CXSIZEFRAME, dpi)+win.GetSystemMetricsForDpi(win.SM_CXPADDEDBORDER, dpi))
++	resize_y := i32(win.GetSystemMetricsForDpi(win.SM_CYSIZEFRAME, dpi)+win.GetSystemMetricsForDpi(win.SM_CXPADDEDBORDER, dpi))
+ 	labels := make([]win.RECT, len(state.labels), allocator=context.temp_allocator)
+ 	for label, i in state.labels { labels[i] = label.bounds }
+ 	defer delete(labels, context.temp_allocator)
+-	return win32_integrated_frame_hit_test(x, y, width, height, i32(state.chrome_height), resize_x, resize_y,
+-		win.IsZoomed(state.hwnd) != false, state.caption_controls[:], labels)
++	return win32_integrated_frame_hit_test(x, y, width, height, state.chrome_height_pixels, resize_x, resize_y,
++		state.maximized, state.caption_controls[:], labels)
+ }
+ 
+ win32_menu_caption_control_at_screen :: proc(state: ^Win32_Menu_State, screen_x, screen_y: i32) -> int {
+@@ -415,47 +389,44 @@ win32_menu_layout_labels :: proc(state: ^Win32_Menu_State) {
+ 	if state == nil || state.menu == nil || state.menu.application == nil || !state.frame_enabled { return }
+ 	state.dpi = win.GetDpiForWindow(state.hwnd)
+ 	if state.dpi == 0 { state.dpi = 96 }
+-	scale := 96.0/f32(state.dpi)
++	scale := f32(state.dpi)/96
++	state.pixels_per_unit = sdl3.GetWindowPixelDensity(state.menu.window)
++	if state.pixels_per_unit <= 0 { state.pixels_per_unit = 1 }
++	state.maximized = win.IsZoomed(state.hwnd) != false
+ 	client: win.RECT
+ 	if !win.GetClientRect(state.hwnd, &client) { return }
+-	client_width := f32(client.right-client.left)*scale
+-	caption_h := f32(win.GetSystemMetricsForDpi(win.SM_CYCAPTION, state.dpi))*scale
+-	frame_y := f32(win.GetSystemMetricsForDpi(win.SM_CYSIZEFRAME, state.dpi))*scale
+-	state.chrome_height = max(caption_h+frame_y, 28)
++	client_width := i32(client.right-client.left)
++	caption_h := i32(win.GetSystemMetricsForDpi(win.SM_CYCAPTION, state.dpi))
++	frame_y := i32(win.GetSystemMetricsForDpi(win.SM_CYSIZEFRAME, state.dpi)+win.GetSystemMetricsForDpi(win.SM_CXPADDEDBORDER, state.dpi))
++	state.chrome_height_pixels = max(caption_h+frame_y, i32(native_pixel_edge(32, scale)))
++	state.chrome_height = f32(state.chrome_height_pixels)/state.pixels_per_unit
+ 	state.menu.content_inset_top = state.chrome_height
+-	frame_x := f32(win.GetSystemMetricsForDpi(win.SM_CXSIZEFRAME, state.dpi))*scale
+-	button_w := f32(win.GetSystemMetricsForDpi(win.SM_CXSIZE, state.dpi))*scale
+-	usable_right := client_width-(button_w*3+frame_x+8)
+-	if win32_menu_update_caption_button_bounds(state, client_width) {
+-		usable_right = f32(state.caption_button_bounds.left)-8
+-	} else {
+-		// Keep a visible fallback on systems where DWM cannot report the bounds.
+-		state.caption_button_bounds = win.RECT{
+-			left=win.LONG(client_width-(button_w*3+frame_x+8)),
+-			top=0,
+-			right=win.LONG(client_width-frame_x),
+-			bottom=win.LONG(state.chrome_height),
+-		}
+-		state.caption_button_bounds_valid = true
+-	}
+-	win32_menu_layout_caption_controls(state)
+-	left := frame_x+8
++	_ = win32_menu_update_caption_button_bounds(state, client_width)
++	state.caption_controls = win32_caption_layout_controls(state.caption_button_bounds, state.caption_button_bounds_valid,
++		client_width, state.chrome_height_pixels, state.dpi, state.maximized)
++	win32_menu_layout_label_bounds(state)
++}
++
++win32_menu_layout_label_bounds :: proc(state: ^Win32_Menu_State) {
++	scale := f32(state.dpi if state.dpi != 0 else 96)/96
++	usable_right := max(i32(state.caption_controls[0].bounds.left)-i32(native_pixel_edge(8, scale)), 0)
++	left := i32(native_pixel_edge(8, scale))
+ 	if title_run := native_text_host_run(state.text_renderer, state.title.host_node); title_run != nil {
+-		title_width := title_run.width+16
+-		state.title.bounds = win.RECT{left=win.LONG(left), top=0, right=win.LONG(min(left+title_width, usable_right)), bottom=win.LONG(state.chrome_height)}
++		title_width := i32(native_pixel_edge(title_run.width, state.pixels_per_unit)+native_pixel_edge(16, scale))
++		state.title.bounds = win.RECT{left=win.LONG(min(left, usable_right)), top=0, right=win.LONG(min(left+title_width, usable_right)), bottom=win.LONG(state.chrome_height_pixels)}
+ 		left += title_width
+ 	} else {
+ 		state.title.bounds = win.RECT{}
+ 	}
+-	left += 8
++	left += i32(native_pixel_edge(8, scale))
+ 	for i in 0..<len(state.labels) {
+ 		label := &state.labels[i]
+ 		label.bounds = win.RECT{}
+ 		if left >= usable_right { continue }
+ 		run := native_text_host_run(state.text_renderer, label.host_node)
+ 		if run == nil { continue }
+-		width := run.width+24
+-		label.bounds = win.RECT{left=win.LONG(left), top=0, right=win.LONG(min(left+width, usable_right)), bottom=win.LONG(state.chrome_height)}
++		width := i32(native_pixel_edge(run.width, state.pixels_per_unit)+native_pixel_edge(24, scale))
++		label.bounds = win.RECT{left=win.LONG(left), top=0, right=win.LONG(min(left+width, usable_right)), bottom=win.LONG(state.chrome_height_pixels)}
+ 		left += width
+ 	}
+ }
+@@ -516,33 +487,48 @@ native_menu_prepare_gpu :: proc(menu: ^Native_Menu_Runtime, rt: ^alicorn.Runtime
+ 	title := menu.application.title
+ 	if title == "" { title = "Alicorn application" }
+ 	state.title_text = title
+-	title_run, title_ok := alicorn.text_run_build(&rt.text_engine, title, 14, allocator=rt.persistent_allocator, scratch_allocator=rt.scratch_allocator)
+-	if !title_ok { return false }
+ 	state.title.host_node = NATIVE_MENU_HOST_NODE_BASE
+-	if !native_text_register_host_run(renderer, state.title.host_node, title_run) {
+-		alicorn.text_run_destroy(&title_run)
+-		return false
+-	}
+ 	for &label, i in state.labels {
+-		run, ok := alicorn.text_run_build(&rt.text_engine, menu.application.menus[i].label, 14,
+-			allocator=rt.persistent_allocator, scratch_allocator=rt.scratch_allocator)
+-		if !ok { return false }
+ 		label.host_node = NATIVE_MENU_HOST_NODE_BASE+alicorn.Node_ID(i+1)
+-		if !native_text_register_host_run(renderer, label.host_node, run) {
+-			alicorn.text_run_destroy(&run)
++	}
++	state.ellipsis_host_node = NATIVE_MENU_HOST_NODE_BASE+alicorn.Node_ID(len(state.labels)+2)
++	if !win32_menu_refresh_text(state, rt) || !win32_caption_sync_masks(state) { return false }
++	win32_menu_layout_labels(state)
++	native_menu_request_chrome_redraw(menu)
++	return true
++}
++
++win32_menu_refresh_text :: proc(state: ^Win32_Menu_State, rt: ^alicorn.Runtime) -> bool {
++	if state == nil || rt == nil || state.text_renderer == nil || state.menu == nil || state.menu.application == nil ||
++		state.title.host_node == 0 || state.ellipsis_host_node == 0 || len(state.labels) != len(state.menu.application.menus) { return false }
++	for label in state.labels { if label.host_node == 0 { return false } }
++	scale := (f32(state.dpi if state.dpi != 0 else 96)/96)/(state.pixels_per_unit if state.pixels_per_unit > 0 else 1)
++	if state.text_scale == scale { return true }
++	count := len(state.labels)+2
++	runs := make([]alicorn.Text_Run, count, allocator=rt.scratch_allocator)
++	defer delete(runs, rt.scratch_allocator)
++	for i in 0..<count {
++		text := state.title_text
++		if i == count-1 { text = "…" }
++		else if i > 0 { text = state.menu.application.menus[i-1].label }
++		run, ok := alicorn.text_run_build(&rt.text_engine, text, 14*scale,
++			allocator=rt.persistent_allocator, scratch_allocator=rt.scratch_allocator)
++		if !ok {
++			for j in 0..<i { alicorn.text_run_destroy(&runs[j]) }
+ 			return false
+ 		}
++		runs[i] = run
+ 	}
+-	close_run, close_ok := alicorn.text_run_build(&rt.text_engine, "×", 16,
+-		allocator=rt.persistent_allocator, scratch_allocator=rt.scratch_allocator)
+-	if !close_ok { return false }
+-	state.close_glyph_host_node = NATIVE_MENU_HOST_NODE_BASE+alicorn.Node_ID(len(state.labels)+3)
+-	if !native_text_register_host_run(renderer, state.close_glyph_host_node, close_run) {
+-		alicorn.text_run_destroy(&close_run)
+-		return false
++	for run, i in runs {
++		id := state.title.host_node
++		if i == count-1 { id = state.ellipsis_host_node }
++		else if i > 0 { id = state.labels[i-1].host_node }
++		if !native_text_set_host_run(state.text_renderer, id, run) {
++			for j in i..<count { alicorn.text_run_destroy(&runs[j]) }
++			return false
++		}
+ 	}
+-	win32_menu_layout_labels(state)
+-	native_menu_request_chrome_redraw(menu)
++	state.text_scale = scale
+ 	return true
+ }
+ 
+@@ -596,89 +582,17 @@ win32_menu_high_contrast_selection_colors :: proc() -> (background, foreground:
+ 		win32_color_ref(win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
+ }
+ 
+-win32_caption_fill :: proc(
+-	commands: ^[dynamic]alicorn.Paint_Command,
+-	node: alicorn.Node_ID,
+-	clip: alicorn.Rect,
+-	x, y, width, height: f32,
+-	color: alicorn.Color,
+-) {
+-	if width <= 0 || height <= 0 { return }
+-	append(commands, alicorn.paint_surface_command(node, alicorn.Rect{x, y, width, height}, clip, color))
+-}
+-
+-win32_caption_outline :: proc(
+-	commands: ^[dynamic]alicorn.Paint_Command,
+-	node: alicorn.Node_ID,
+-	clip: alicorn.Rect,
+-	x, y, width, height, stroke: f32,
+-	color: alicorn.Color,
+-) {
+-	win32_caption_fill(commands, node+1, clip, x, y, width, stroke, color)
+-	win32_caption_fill(commands, node+2, clip, x, y+height-stroke, width, stroke, color)
+-	win32_caption_fill(commands, node+3, clip, x, y+stroke, stroke, max(height-2*stroke, 0), color)
+-	win32_caption_fill(commands, node+4, clip, x+width-stroke, y+stroke, stroke, max(height-2*stroke, 0), color)
+-}
+-
+-win32_caption_control_visual_rect :: proc(
+-	hit_bounds: win.RECT,
+-	index: int,
+-	client_width, chrome_height: f32,
+-) -> alicorn.Rect {
+-	left, top := f32(hit_bounds.left), f32(hit_bounds.top)
+-	right, bottom := f32(hit_bounds.right), f32(hit_bounds.bottom)
+-	if index == 2 {
+-		// The visual close backplate is full bleed. Keep hit_bounds unchanged so
+-		// the narrow outer frame can still receive resize hit tests.
+-		top = 0
+-		right = client_width
+-		bottom = chrome_height
+-	}
+-	return alicorn.Rect{left, top, max(right-left, 0), max(bottom-top, 0)}
+-}
+-
+-win32_caption_append_glyph :: proc(
+-	commands: ^[dynamic]alicorn.Paint_Command,
+-	state: ^Win32_Menu_State,
+-	index: int,
+-	color: alicorn.Color,
+-	clip: alicorn.Rect,
+-	maximized: bool,
+-) {
+-	if state == nil || index < 0 || index >= len(state.caption_controls) { return }
+-	control := state.caption_controls[index].bounds
+-	visual := win32_caption_control_visual_rect(control, index, clip.w, clip.h)
+-	left, top := visual.x, visual.y
+-	width, height := visual.w, visual.h
+-	cx, cy := left+width/2, top+height/2
+-	stroke := f32(1.25)
+-	base := NATIVE_MENU_HOST_SOLID_NODE+alicorn.Node_ID(32+index*8)
+-	if index == 0 {
+-		win32_caption_fill(commands, base, clip, cx-5, cy+3, 10, stroke, color)
+-	} else if index == 1 && !maximized {
+-		win32_caption_outline(commands, base, clip, cx-5, cy-5, 10, 10, stroke, color)
+-	} else if index == 1 {
+-		// Two offset outlined frames form the standard restore glyph.
+-		win32_caption_outline(commands, base, clip, cx-2, cy-5, 7, 7, stroke, color)
+-		win32_caption_outline(commands, base+4, clip, cx-5, cy-2, 7, 7, stroke, color)
+-	} else {
+-		run := native_text_host_run(state.text_renderer, state.close_glyph_host_node)
+-		if run == nil { return }
+-		x := left+(width-run.width)/2
+-		y := top+(height-run.height)/2
+-		append(commands, alicorn.paint_text_command(
+-			state.close_glyph_host_node,
+-			alicorn.Rect{x, y, run.width, run.height}, clip,
+-			native_text_host_handle(state.text_renderer, state.close_glyph_host_node), color,
+-		))
+-	}
+-}
+-
+ native_menu_overlay_commands :: proc(menu: ^Native_Menu_Runtime, width, height: f32, allocator: mem.Allocator) -> []alicorn.Paint_Command {
+ 	if menu == nil || menu.application == nil || menu.application.window_decorations != .Integrated_Title_Bar || menu.platform_data == nil { return nil }
+ 	state := cast(^Win32_Menu_State)menu.platform_data
+ 	if !state.frame_enabled || state.chrome_height <= 0 { return nil }
+-	commands := make([dynamic]alicorn.Paint_Command, 0, len(state.labels)*2+32, allocator=allocator)
++	if !win32_caption_sync_masks(state) { fail("native caption masks could not be built") }
++	if state.text_renderer != nil && menu.runtime != nil {
++		previous_scale := state.text_scale
++		if !win32_menu_refresh_text(state, menu.runtime) { fail("native caption text scale could not be refreshed") }
++		if previous_scale != state.text_scale { win32_menu_layout_labels(state) }
++	}
++	commands := make([dynamic]alicorn.Paint_Command, 0, len(state.labels)*2+96, allocator=allocator)
+ 	background, foreground := win32_menu_chrome_colors(state)
+ 	hover_background, open_background, pressed_background := win32_menu_feedback_colors(background, foreground)
+ 	full := alicorn.Rect{0, 0, width, min(state.chrome_height, height)}
+@@ -699,21 +613,21 @@ native_menu_overlay_commands :: proc(menu: ^Native_Menu_Runtime, width, height:
+ 			}
+ 			append(&commands, alicorn.paint_surface_command(
+ 				NATIVE_MENU_HOST_SOLID_NODE+1,
+-				alicorn.Rect{f32(bounds.left), 2, f32(bounds.right-bounds.left), max(state.chrome_height-4, 0)},
++				win32_chrome_rect_to_window(bounds, state.pixels_per_unit),
+ 				full, label_background,
+ 			))
+ 		}
+ 	}
+-	maximized := win.IsZoomed(state.hwnd) != false
++	maximized := state.maximized
+ 	for control, index in state.caption_controls {
+ 		if control.bounds.right <= control.bounds.left || control.bounds.bottom <= control.bounds.top { continue }
+ 		button_foreground := foreground
+ 		if index == state.caption_hovered {
+ 			hover_color := hover_background
+ 			if index == 2 && !state.high_contrast {
+-				hover_color = win32_color_rgb(196, 43, 28)
++				hover_color = win32_color_rgb(232, 17, 35)
+ 				button_foreground = win32_color_rgb(255, 255, 255)
+-				if index == state.caption_pressed { hover_color = win32_color_rgb(164, 38, 44) }
++				if index == state.caption_pressed { hover_color = win32_color_mix(background, hover_color, 0.60) }
+ 			} else if state.high_contrast {
+ 				hover_color = selection_background
+ 				button_foreground = selection_foreground
+@@ -722,35 +636,52 @@ native_menu_overlay_commands :: proc(menu: ^Native_Menu_Runtime, width, height:
+ 			}
+ 			append(&commands, alicorn.paint_surface_command(
+ 				NATIVE_MENU_HOST_SOLID_NODE+2+alicorn.Node_ID(index),
+-				win32_caption_control_visual_rect(control.bounds, index, width, full.h),
++				win32_chrome_rect_to_window(control.bounds, state.pixels_per_unit),
+ 				full, hover_color,
+ 			))
+ 		}
+ 		win32_caption_append_glyph(&commands, state, index, button_foreground, full, maximized)
+ 	}
+-	if title_run := native_text_host_run(state.text_renderer, state.title.host_node); title_run != nil {
+-		y := max((state.chrome_height-title_run.height)/2, 0)
+-		append(&commands, alicorn.paint_text_command(
+-			state.title.host_node,
+-			alicorn.Rect{f32(state.title.bounds.left)+8, y, title_run.width, title_run.height},
+-			full, native_text_host_handle(state.text_renderer, state.title.host_node), foreground,
+-		))
+-	}
++	win32_menu_append_text(&commands, state, state.title, 8, foreground, ellipsis=true)
+ 	for label, i in state.labels {
+ 		run := native_text_host_run(state.text_renderer, label.host_node)
+ 		if run == nil || label.bounds.right <= label.bounds.left { continue }
+-		y := max((state.chrome_height-run.height)/2, 0)
+ 		label_color := foreground
+ 		if i == active_index && state.high_contrast { label_color = selection_foreground }
+-		append(&commands, alicorn.paint_text_command(
+-			label.host_node,
+-			alicorn.Rect{f32(label.bounds.left)+12, y, run.width, run.height},
+-			full, native_text_host_handle(state.text_renderer, label.host_node), label_color,
+-		))
++		win32_menu_append_text(&commands, state, label, 12, label_color)
+ 	}
+ 	return commands[:]
+ }
+ 
++win32_menu_append_text :: proc(
++	commands: ^[dynamic]alicorn.Paint_Command, state: ^Win32_Menu_State,
++	label: Win32_Menu_Label, padding: f32, color: alicorn.Color, ellipsis := false,
++) {
++	run := native_text_host_run(state.text_renderer, label.host_node)
++	if run == nil || label.bounds.right <= label.bounds.left { return }
++	bounds := label.bounds
++	inset := win.LONG(native_pixel_edge(padding, f32(state.dpi if state.dpi != 0 else 96)/96))
++	bounds.left = min(bounds.left+inset, bounds.right)
++	bounds.right = max(bounds.right-inset, bounds.left)
++	clip := win32_chrome_rect_to_window(bounds, state.pixels_per_unit)
++	if clip.w <= 0 { return }
++	y := clip.y+max((clip.h-run.height)/2, 0)
++	text_clip := clip
++	if ellipsis && run.width > clip.w {
++		if mark := native_text_host_run(state.text_renderer, state.ellipsis_host_node); mark != nil {
++			text_clip.w = max(clip.w-mark.width, 0)
++			append(commands, alicorn.paint_text_command(state.ellipsis_host_node,
++				alicorn.Rect{clip.x+text_clip.w, y, mark.width, mark.height}, clip,
++				native_text_host_handle(state.text_renderer, state.ellipsis_host_node), color))
++		}
++	}
++	if text_clip.w > 0 {
++		append(commands, alicorn.paint_text_command(label.host_node,
++			alicorn.Rect{clip.x, y, run.width, run.height}, text_clip,
++			native_text_host_handle(state.text_renderer, label.host_node), color))
++	}
++}
++
+ win32_menu_dispatch_native_id :: proc(state: ^Win32_Menu_State, native_id: u32) {
+ 	if state == nil { return }
+ 	if state.menu != nil && native_id != 0 && int(native_id) < len(state.commands) && !native_inspector_visible(state.menu.inspector) {
+@@ -798,13 +729,10 @@ win32_menu_open_popup :: proc(state: ^Win32_Menu_State, index: int) {
+ 	win32_menu_refresh_state(state)
+ 	client_origin := win.POINT{}
+ 	if !win.ClientToScreen(state.hwnd, &client_origin) { return }
+-	dpi := win.GetDpiForWindow(state.hwnd)
+-	if dpi == 0 { dpi = 96 }
+-	to_pixels := f32(dpi)/96.0
+ 	flags := win.UINT(win.TPM_RETURNCMD | win.TPM_NONOTIFY | win.TPM_LEFTALIGN | win.TPM_TOPALIGN)
+ 	command := win.TrackPopupMenu(label.popup, flags,
+-		win.INT(i32(client_origin.x)+i32(f32(label.bounds.left)*to_pixels)),
+-		win.INT(i32(client_origin.y)+i32(f32(label.bounds.bottom)*to_pixels)),
++		win.INT(client_origin.x+label.bounds.left),
++		win.INT(client_origin.y+label.bounds.bottom),
+ 		0, state.hwnd, nil)
+ 	hovered_index := -1
+ 	if command == 0 { hovered_index = win32_menu_hovered_label_at_cursor(state) }
+@@ -901,6 +829,15 @@ win32_menu_cancel_app_pointer :: proc(state: ^Win32_Menu_State) {
+ 	alicorn.cause_end(rt, cancel_cause)
+ }
+ 
++win32_menu_set_active :: proc(state: ^Win32_Menu_State, active: bool) -> bool {
++	if state == nil || state.active == active { return false }
++	state.active = active
++	state.caption_hovered = -1
++	state.caption_pressed = -1
++	native_menu_request_chrome_redraw(state.menu)
++	return true
++}
++
+ win32_menu_subclass :: proc "system" (hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM, subclass_id: win.UINT_PTR, ref_data: win.DWORD_PTR) -> win.LRESULT {
+ 	context = runtime.default_context()
+ 	state := win32_menu_state(ref_data)
+@@ -1036,17 +973,9 @@ win32_menu_subclass :: proc "system" (hwnd: win.HWND, message: win.UINT, wparam:
+ 	if message == win.WM_DWMCOMPOSITIONCHANGED && integrated {
+ 		if !win32_menu_reapply_frame(state) { win32_menu_disable_frame(state) }
+ 	} else if message == win.WM_NCACTIVATE {
+-		state.active = wparam != 0
+-		state.caption_hovered = -1
+-		state.caption_pressed = -1
+-		native_menu_request_chrome_redraw(state.menu)
++		_ = win32_menu_set_active(state, wparam != 0)
+ 	} else if message == win.WM_ACTIVATE {
+-		state.active = (u16(uintptr(wparam)) & 0xffff) != 0
+-		if !state.active {
+-			state.caption_hovered = -1
+-			state.caption_pressed = -1
+-		}
+-		native_menu_request_chrome_redraw(state.menu)
++		_ = win32_menu_set_active(state, (u16(uintptr(wparam)) & 0xffff) != 0)
+ 	} else if message == win.WM_DPICHANGED && integrated {
+ 		// SDL owns the HWND and processes the suggested RECT through the chained
+ 		// procedure above. Observe the resulting DPI/size; do not SetWindowPos here.
+@@ -1056,7 +985,12 @@ win32_menu_subclass :: proc "system" (hwnd: win.HWND, message: win.UINT, wparam:
+ 		native_menu_request_chrome_redraw(state.menu)
+ 	} else if (message == win.WM_WINDOWPOSCHANGED || message == win.WM_SIZE) && integrated {
+ 		position := cast(^win.WINDOWPOS)uintptr(lparam)
+-		if message == win.WM_SIZE || (position != nil && (position.flags & win.SWP_NOSIZE) == 0) { win32_menu_layout_labels(state) }
++		// DWM's bounds can be undefined while hidden. Showing the HWND must
++		// replace the fallback even when the client dimensions have not changed.
++		if message == win.WM_SIZE || (position != nil &&
++			((position.flags & win.SWP_NOSIZE) == 0 || (position.flags & win.SWP_SHOWWINDOW) != 0)) {
++			win32_menu_layout_labels(state)
++		}
+ 		native_menu_request_chrome_redraw(state.menu)
+ 	} else if (message == win.WM_THEMECHANGED || message == win.WM_SETTINGCHANGE || message == win.WM_SYSCOLORCHANGE) && integrated {
+ 		win32_menu_layout_labels(state)
+@@ -1088,6 +1022,7 @@ native_menu_prepare :: proc(menu: ^Native_Menu_Runtime) -> bool {
+ 	state.caption_hovered = -1
+ 	state.caption_pressed = -1
+ 	state.high_contrast = false
++	state.windows_11 = win32_caption_windows_11()
+ 	state.frame_enabled = menu.application.window_decorations == .Integrated_Title_Bar
+ 	menu.platform_data = rawptr(state)
+ 	state.commands = make([dynamic]Application_Command_ID, 1, allocator=state.allocator)
+@@ -1153,6 +1088,7 @@ native_menu_accessibility_appearance_changed :: proc(
+ native_menu_destroy :: proc(menu: ^Native_Menu_Runtime) {
+ 	if menu == nil || menu.platform_data == nil { return }
+ 	state := cast(^Win32_Menu_State)menu.platform_data
++	win32_caption_destroy_masks(state)
+ 	if state.installed { _ = RemoveWindowSubclass(state.hwnd, win32_menu_subclass, WIN32_MENU_SUBCLASS_ID) }
+ 	if state.root != nil {
+ 		if state.menu_attached { _ = win.SetMenu(state.hwnd, nil) }

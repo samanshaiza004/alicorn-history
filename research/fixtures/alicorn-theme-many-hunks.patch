@@ -1,0 +1,199 @@
+diff --git a/tools/theme/main.odin b/tools/theme/main.odin
+index 98fe740..ac28a46 100644
+--- a/tools/theme/main.odin
++++ b/tools/theme/main.odin
+@@ -4,6 +4,7 @@ import "core:fmt"
+ import "core:os"
+ import "core:path/filepath"
+ import "core:strings"
++import alicorn "../../runtime"
+ import theme "../../theme"
+ 
+ main :: proc() {
+@@ -101,13 +102,14 @@ theme_cli_usage :: proc(output: ^os.File) {
+ 	fmt.fprintln(output, "")
+ 	fmt.fprintln(output, "Usage:")
+ 	fmt.fprintln(output, "  theme check <file>                 Validate strict theme JSON")
+-	fmt.fprintln(output, "  theme explain <file> <query>       Explain a token, material.<name>, or recipe.button.<variant>")
++	fmt.fprintln(output, "  theme explain <file> <query>       Explain a token, role.<name>, material.<name>, or recipe.button.<variant>")
+ 	fmt.fprintln(output, "  theme compile <file> --output <file> --symbol <name> [--package <name>] [--runtime-import <path>]")
+ 	fmt.fprintln(output, "  theme help                         Show this help")
+ 	fmt.fprintln(output, "")
+ 	fmt.fprintln(output, "Only schema/contract versions supported by this build are accepted. JSON is Alicorn's sole native v0.2 authoring format.")
+ 	fmt.fprintln(output, "JSON color components are sRGB; explain reports converted linear-sRGB channels (alpha unchanged).")
+ 	fmt.fprintln(output, "Only extends = alicorn.base is supported; it uses typed built-in defaults and never loads a path.")
++	fmt.fprintln(output, "Omitted core roles and recipe fields use typed Alicorn defaults; absent extension roles stay unresolved; flat is the material fallback.")
+ 	fmt.fprintln(output, "compile emits an Odin factory and matching destroy procedure; generated sources default to package main and import alicorn:runtime.")
+ }
+ 
+@@ -142,10 +144,14 @@ theme_cli_run :: proc(path, token_name: string) -> int {
+ 		if includes_base {
+ 			fmt.println("base: alicorn.base (typed built-in layer; no filesystem lookup)")
+ 		}
++		fmt.printfln("core roles: {} source bindings; unbound roles use DEFAULT_STYLE_THEME", len(compiled.debug.core_roles))
++		fmt.printfln("button recipes: {} sparse overrides; omitted fields resolve from DEFAULT_STYLE_THEME.button_recipes", len(compiled.debug.button_recipes))
++		fmt.printfln("extensions: {} explicit roles; undeclared roles remain unresolved", len(compiled.debug.extension_roles))
++		fmt.printfln("materials: {} named definitions; flat surfaces use STYLE_MATERIAL_FLAT", len(compiled.debug.materials))
+ 		return 0
+ 	}
+ 
+-	return theme_cli_explain(compiled, path, token_name)
++	return theme_cli_explain(compiled, runtime_theme, path, token_name)
+ }
+ 
+ theme_cli_compile_file :: proc(path: string) -> (output: theme.Theme_Compile_Output, schema_version: u32, includes_base, ok: bool) {
+@@ -184,8 +190,11 @@ theme_cli_compile_file :: proc(path: string) -> (output: theme.Theme_Compile_Out
+ 		return {}, 0, false, false
+ 	}
+ 	for diagnostic in compiled.diagnostics {
+-		fmt.eprintf("{:s}:{:d}:{:d}: error: {:s}", diagnostic.path, diagnostic.span.line,
+-			diagnostic.span.column, theme_cli_compile_diagnostic_message(diagnostic))
++		severity := "error"
++		if diagnostic.severity == .Warning { severity = "warning" }
++		fmt.eprintf("{:s}:{:d}:{:d}: {:s}: {:s}", diagnostic.path, diagnostic.span.line,
++			diagnostic.span.column, severity, theme_cli_compile_diagnostic_message(diagnostic))
++		if diagnostic.replacement != "" { fmt.eprintf(" (replacement: {:s})", diagnostic.replacement) }
+ 		if len(diagnostic.symbol_path) > 0 {
+ 			fmt.eprint(" [")
+ 			for symbol, index in diagnostic.symbol_path {
+@@ -294,7 +303,10 @@ theme_cli_compile_source :: proc(source: theme.Theme_Source_Model, include_base:
+ 	return theme.theme_compile({source}, support=theme.THEME_COMPILER_SUPPORT), true
+ }
+ 
+-theme_cli_explain :: proc(output: theme.Theme_Compile_Output, input_path, token_name: string) -> int {
++theme_cli_explain :: proc(output: theme.Theme_Compile_Output, runtime_theme: alicorn.Style_Theme, input_path, token_name: string) -> int {
++	if len(token_name) > len("role.") && token_name[:len("role.")] == "role." {
++		return theme_cli_explain_core_role(output, runtime_theme, input_path, token_name[len("role."):])
++	}
+ 	if len(token_name) > len("material.") && token_name[:len("material.")] == "material." {
+ 		return theme_cli_explain_material(output, input_path, token_name[len("material."):])
+ 	}
+@@ -367,13 +379,93 @@ theme_cli_explain :: proc(output: theme.Theme_Compile_Output, input_path, token_
+ 	return 0
+ }
+ 
++theme_cli_explain_core_role :: proc(output: theme.Theme_Compile_Output, runtime_theme: alicorn.Style_Theme, input_path, name: string) -> int {
++	role, runtime_role, known := theme_cli_core_role(name)
++	if !known {
++		fmt.eprintfln("{:s}: error: unknown core color role: {:s}", input_path, name)
++		return 1
++	}
++	value := runtime_theme.colors[int(runtime_role)]
++	fmt.printfln("role: {:s}", name)
++	fmt.printfln("value: linear-srgb({:.7g}, {:.7g}, {:.7g}, alpha={:.7g})", value.r, value.g, value.b, value.a)
++	binding_index := -1
++	for binding, index in output.debug.core_roles {
++		if binding.role == role { binding_index = index; break }
++	}
++	if binding_index < 0 {
++		fmt.println("origin: Alicorn DEFAULT_STYLE_THEME fallback (no source binding)")
++		return 0
++	}
++	binding := output.debug.core_roles[binding_index]
++	fmt.printfln("binding: {:s} at {:s}:{:d}:{:d}", binding.token, binding.span.path, binding.span.line, binding.span.column)
++	provenance_index := -1
++	for token, index in output.debug.tokens {
++		if token.name == binding.token { provenance_index = index; break }
++	}
++	if provenance_index < 0 {
++		fmt.eprintfln("{:s}: error: compiler returned missing token provenance for role {:s}", input_path, name)
++		return 1
++	}
++	token := output.debug.tokens[provenance_index]
++	for hop in 0..<len(output.debug.tokens) {
++		fmt.printfln("value source: {:s} at {:s}:{:d}:{:d}", token.name, token.span.path, token.span.line, token.span.column)
++		if token.alias_target == "" { break }
++		next_index := -1
++		for candidate, index in output.debug.tokens {
++			if candidate.name == token.alias_target { next_index = index; break }
++		}
++		if next_index < 0 {
++			fmt.eprintfln("{:s}: error: compiler returned missing alias provenance for {:s}", input_path, token.alias_target)
++			return 1
++		}
++		token = output.debug.tokens[next_index]
++	}
++	return 0
++}
++
++theme_cli_core_role :: proc(name: string) -> (theme.Core_Color_Role, alicorn.Style_Color_Role, bool) {
++	switch name {
++	case "window_background": return .Window_Background, .Window_Background, true
++	case "surface": return .Surface, .Surface, true
++	case "subtle_surface": return .Subtle_Surface, .Subtle_Surface, true
++	case "editor_background": return .Editor_Background, .Editor_Background, true
++	case "text": return .Text, .Text, true
++	case "muted_text": return .Muted_Text, .Muted_Text, true
++	case "accent": return .Accent, .Accent, true
++	case "accent_hover": return .Accent_Hover, .Accent_Hover, true
++	case "accent_pressed": return .Accent_Pressed, .Accent_Pressed, true
++	case "accent_text": return .Accent_Text, .Accent_Text, true
++	case "selection": return .Selection, .Selection, true
++	case "focus": return .Focus, .Focus, true
++	case "semantic_focus": return .Semantic_Focus, .Semantic_Focus, true
++	case "border": return .Border, .Border, true
++	case "danger": return .Danger, .Danger, true
++	case "success": return .Success, .Success, true
++	case "scrollbar_track": return .Scrollbar_Track, .Scrollbar_Track, true
++	case "scrollbar_thumb": return .Scrollbar_Thumb, .Scrollbar_Thumb, true
++	}
++	return .Window_Background, .Window_Background, false
++}
++
+ theme_cli_explain_material :: proc(output: theme.Theme_Compile_Output, input_path, name: string) -> int {
+ 	index := -1
+ 	for material, candidate_index in output.debug.materials {
+ 		if material.name == name { index = candidate_index; break }
+ 	}
+ 	if index < 0 || index >= len(output.theme.materials) {
+-		fmt.eprintfln("{:s}: error: material not found: {:s}", input_path, name)
++		if name == "flat" {
++			material := alicorn.STYLE_MATERIAL_FLAT
++			fmt.println("material: flat")
++			fmt.println("kind: flat")
++			fmt.println("origin: Alicorn STYLE_MATERIAL_FLAT (runtime MATERIAL_FLAT)")
++			fmt.printfln("bevel_width: {:.7g}", material.bevel_width)
++			fmt.printfln("bevel_strength: {:.7g}", material.bevel_strength)
++			fmt.printfln("inner_shadow_strength: {:.7g}", material.inner_shadow_strength)
++			fmt.printfln("outer_shadow_strength: {:.7g}", material.outer_shadow_strength)
++			fmt.printfln("outer_shadow_radius: {:.7g}", material.outer_shadow_radius)
++			return 0
++		}
++		fmt.eprintfln("{:s}: error: material not found: {:s}; undeclared named materials are not synthesized (flat is the runtime fallback)", input_path, name)
+ 		return 1
+ 	}
+ 	value := output.theme.materials[index]
+@@ -401,13 +493,13 @@ theme_cli_explain_button_recipe :: proc(output: theme.Theme_Compile_Output, inpu
+ 	for recipe, candidate_index in output.debug.button_recipes {
+ 		if recipe.variant == variant { index = candidate_index; break }
+ 	}
++	fmt.printfln("recipe: button.{:s}", variant_name)
+ 	if index < 0 || index >= len(output.theme.button_recipes) {
+-		fmt.eprintfln("{:s}: error: button recipe has no authored override: {:s}", input_path, variant_name)
+-		return 1
++		fmt.println("origin: Alicorn DEFAULT_STYLE_THEME.button_recipes")
++		return 0
+ 	}
+ 	override := output.theme.button_recipes[index]
+ 	span := output.debug.button_recipes[index].span
+-	fmt.printfln("recipe: button.{:s}", variant_name)
+ 	fmt.printfln("defined at: {:s}:{:d}:{:d}", span.path, span.line, span.column)
+ 	fmt.println("authored overrides:")
+ 	if override.has_surface_role { fmt.printfln("  surface_role: {}", override.surface_role) }
+@@ -435,7 +527,7 @@ theme_cli_explain_button_recipe :: proc(output: theme.Theme_Compile_Output, inpu
+ 		if transform.has_text_role { fmt.printfln("  {:s}.text_role: {}", state_name, transform.text_role) }
+ 		if transform.has_text_mix { fmt.printfln("  {:s}.text_mix: {:.7g}", state_name, transform.text_mix) }
+ 	}
+-	fmt.println("unspecified values inherit the built-in or preceding theme layer")
++	fmt.println("unspecified values resolve from Alicorn DEFAULT_STYLE_THEME.button_recipes")
+ 	return 0
+ }
+ 
+@@ -492,6 +584,7 @@ theme_cli_compile_diagnostic_message :: proc(diagnostic: theme.Theme_Diagnostic)
+ 	case .Invalid_Material: return "material parameters are outside supported ranges"
+ 	case .Invalid_Button_Recipe: return "button recipe contains an unsupported or invalid value"
+ 	case .Duplicate_Button_Recipe: return "button recipe variant is defined more than once in one layer"
++	case .Deprecated_Theme_Feature: return "deprecated theme feature"
+ 	}
+ 	return "theme compilation failed"
+ }

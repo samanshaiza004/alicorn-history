@@ -1,0 +1,3170 @@
+diff --git a/native/sdl_gpu/main.odin b/native/sdl_gpu/main.odin
+index aff0358..170189c 100644
+--- a/native/sdl_gpu/main.odin
++++ b/native/sdl_gpu/main.odin
+@@ -1,2650 +1,28 @@
+ package alicorn_sdl_gpu
+ 
+-// Native SDL3/SDL_GPU proof path. It renders Alicorn's retained display list
+-// with persistent solid-quad batches and renders text
+-// commands through the retained Runa glyph pipeline. This exercises real
+-// swapchain acquisition, ordered render passes, logical-to-physical composition
+-// and asynchronous resource retirement.
++// Native SDL3/SDL_GPU host entry point. Subsystems are kept in neighboring
++// same-package files so the host wiring stays easy to follow.
+ import "core:fmt"
+-import "core:math"
+-import "core:mem"
+ import "core:os"
+-import "base:runtime"
+ import "core:c"
+ import "core:strconv"
+ import "core:strings"
+-import "core:time"
+ import alicorn "../../runtime"
+ import "vendor:sdl3"
+ 
+-RESIZE_STRESS_ITERATIONS :: 300
+-NATIVE_DESCRIPTION_STABILIZATION_LIMIT :: 4
+-NATIVE_TEXT_BASE :: "Alicorn retained display list"
+-NATIVE_TEXT_MUTATED :: "Alicorn retained display list Z"
+-
+-Window_Metrics :: struct {
+-	logical_width:  int,
+-	logical_height: int,
+-	pixel_width:    int,
+-	pixel_height:   int,
+-	pixel_density:  f32,
+-	display_scale:  f32,
+-}
+-
+-Native_In_Flight :: struct {
+-	fence: ^sdl3.GPUFence,
+-}
+-
+-// Native host work uses its own resettable arena. This keeps atlas snapshots
+-// and other renderer-side temporary products out of the caller's ambient
+-// temporary allocator; application callbacks retain their original context.
+-Native_Host_Scratch :: struct {
+-	backing:  mem.Allocator,
+-	arena:    ^mem.Dynamic_Arena,
+-	allocator: mem.Allocator,
+-}
+-
+-native_host_scratch_make :: proc(backing := context.allocator) -> Native_Host_Scratch {
+-	scratch := Native_Host_Scratch{backing=backing}
+-	scratch.arena = new(mem.Dynamic_Arena, allocator=backing)
+-	mem.dynamic_arena_init(scratch.arena, block_allocator=backing, array_allocator=backing)
+-	scratch.allocator = mem.dynamic_arena_allocator(scratch.arena)
+-	return scratch
+-}
+-
+-native_host_scratch_reset :: proc(scratch: ^Native_Host_Scratch) {
+-	if scratch != nil && scratch.arena != nil { mem.dynamic_arena_reset(scratch.arena) }
+-}
+-
+-native_host_scratch_destroy :: proc(scratch: ^Native_Host_Scratch) {
+-	if scratch == nil || scratch.arena == nil { return }
+-	mem.dynamic_arena_destroy(scratch.arena)
+-	free(scratch.arena, allocator=scratch.backing)
+-	scratch^ = {}
+-}
+-
+-#assert(offset_of(Native_Text_Vertex, position) == 0)
+-#assert(offset_of(Native_Text_Vertex, color) == size_of([3]f32))
+-#assert(offset_of(Native_Text_Vertex, uv) == size_of([3]f32) + size_of([4]f32))
+-#assert(size_of(Native_Text_Vertex) == size_of([9]f32))
+-#assert(size_of(Native_Text_Uniforms) == size_of([32]f32))
+-
+-Native_UI_Nodes :: struct {
+-	field:   alicorn.Node_ID,
+-	surface: alicorn.Node_ID,
+-}
+-
+-// Application_Key is the small cross-platform command vocabulary exposed by
+-// the SDL host. Applications do not need to depend on SDL keycode constants
+-// just to implement navigation or a few commands.
+-Application_Key :: enum {
+-	Left,
+-	Right,
+-	Up,
+-	Down,
+-	Page_Up,
+-	Page_Down,
+-	Home,
+-	End,
+-	Fit_Selection,
+-	Command_1,
+-	Command_2,
+-	Command_3,
+-	Toggle,
+-	Open_Repository,
+-	Open_Command_Palette,
+-	Find,
+-	Workspace_Search,
+-	Context_Menu,
+-	Workspace_Rename,
+-	Find_Next,
+-	Find_Previous,
+-	Escape,
+-	Return,
+-}
+-
+-// These keys may be offered to an application before native text editing so a
+-// focused text field can participate in transient UI such as a command picker.
+-application_key_can_preempt_text_field :: proc(key: Application_Key, composition_active := false) -> bool {
+-	if key == .Escape && composition_active { return false }
+-	if key == .Workspace_Rename && composition_active { return false }
+-	#partial switch key {
+-	case .Up, .Down, .Page_Up, .Page_Down, .Open_Repository, .Open_Command_Palette,
+-	     .Find, .Workspace_Search, .Workspace_Rename, .Context_Menu, .Find_Next, .Find_Previous, .Escape, .Return:
+-		return true
+-	case:
+-		return false
+-	}
+-}
+-
+-native_text_field_return_key :: proc(shifted: bool) -> Application_Key {
+-	return .Find_Previous if shifted else .Return
+-}
+-
+-// native_route_focused_control_key is kept separate from the event loop so the
+-// platform key convention for retained controls can be verified headlessly.
+-native_route_focused_control_key :: proc(rt: ^alicorn.Runtime, key: sdl3.Keycode) -> bool {
+-	switch key {
+-	case sdl3.K_SPACE:
+-		return alicorn.activate_focused(rt, .Space)
+-	case sdl3.K_RETURN, sdl3.K_KP_ENTER:
+-		return alicorn.activate_focused(rt, .Enter)
+-	case sdl3.K_LEFT, sdl3.K_DOWN:
+-		return alicorn.adjust_focused_slider(rt, -1)
+-	case sdl3.K_RIGHT, sdl3.K_UP:
+-		return alicorn.adjust_focused_slider(rt, 1)
+-	case sdl3.K_HOME:
+-		return alicorn.set_focused_slider_bound(rt, .Minimum)
+-	case sdl3.K_END:
+-		return alicorn.set_focused_slider_bound(rt, .Maximum)
+-	case:
+-		return false
+-	}
+-}
+-
+-// Application_Command_ID is a compatibility/transport alias for Alicorn's
+-// runtime-visible Action_ID. Platform-native menu item IDs stay host-private.
+-Application_Command_ID :: alicorn.Action_ID
+-
+-Application_Menu_Item_Kind :: enum {
+-	Command,
+-	Separator,
+-	Submenu,
+-}
+-
+-Application_Menu_Modifier :: enum {
+-	Primary,
+-	Shift,
+-	Alt,
+-	Super,
+-}
+-
+-Application_Menu_Modifiers :: distinct bit_set[Application_Menu_Modifier; u8]
+-
+-// A shortcut uses one printable key plus platform-neutral modifiers.
+-// Primary means Ctrl on Windows and Command on macOS; Super maps to the
+-// Windows key on Windows and Control on macOS.
+-Application_Menu_Shortcut :: struct {
+-	key:       rune,
+-	modifiers: Application_Menu_Modifiers,
+-}
+-
+-// Menu descriptions are borrowed for the duration of Run. Labels and menu
+-// structure are snapshotted at startup; Action_State is read from
+-// the borrowed item storage whenever a native menu opens. Keep that storage
+-// stable and update its state on the application thread.
+-Application_Menu_Item :: struct {
+-	kind:     Application_Menu_Item_Kind,
+-	command:  Application_Command_ID,
+-	label:    string,
+-	state:    alicorn.Action_State,
+-	shortcut: Application_Menu_Shortcut,
+-	items:    []Application_Menu_Item,
+-}
+-
+-Application_Menu :: struct {
+-	label: string,
+-	items: []Application_Menu_Item,
+-}
+-
+-Window_Decoration_Mode :: enum {
+-	System,
+-	Integrated_Title_Bar,
+-}
+-
+-Application_Build_Proc :: proc(
+-	state: rawptr,
+-	rt: ^alicorn.Runtime,
+-	logical_width, logical_height: int,
+-	dpi_scale: f32,
+-) -> alicorn.Node_ID
+-Application_Text_Change_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alicorn.Text_Change)
+-Application_Text_Input_Event_Kind :: enum { Commit, Preedit, Cancel }
+-// SDL event text is borrowed for the callback. Preedit selection offsets are
+-// UTF-8 byte offsets, not SDL's character indexes.
+-Application_Text_Input_Event :: struct {
+-	kind: Application_Text_Input_Event_Kind,
+-	text: string,
+-	selection_start_byte: int,
+-	selection_end_byte: int,
+-}
+-Application_Text_Input_Proc :: proc(
+-	state: rawptr,
+-	rt: ^alicorn.Runtime,
+-	owner: alicorn.Node_ID,
+-	event: Application_Text_Input_Event,
+-)
+-// Application_Text_Navigation_Key is the host-normalized editing intent. The
+-// SDL host applies platform modifier conventions before delivering it, so an
+-// application need not interpret Ctrl/Option/Command itself.
+-Application_Text_Navigation_Key :: enum {
+-	Left, Right, Home, End, Up, Down, Page_Up, Page_Down, Backspace, Delete, Tab,
+-	Word_Left, Word_Right, Line_Start, Line_End, Document_Start, Document_End,
+-	Delete_Word_Backward, Delete_Word_Forward, Delete_Line_Backward, Delete_Line_Forward,
+-}
+-Application_Text_Key_Event :: struct {
+-	key:     Application_Text_Navigation_Key,
+-	shift:   bool,
+-	control: bool,
+-	alt:     bool,
+-	super:   bool,
+-}
+-Application_Text_Key_Proc :: proc(
+-	state: rawptr,
+-	rt: ^alicorn.Runtime,
+-	owner: alicorn.Node_ID,
+-	event: Application_Text_Key_Event,
+-) -> bool
+-Application_Key_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, key: Application_Key) -> bool
+-Application_Pointer_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Pointer_Event, target: alicorn.Node_ID)
+-Application_Drag_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Drag_Event)
+-Application_Scroll_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scroll_Event)
+-Application_Tick_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime)
+-Application_Start_Proc :: proc(state: rawptr, waker: Application_Waker)
+-Application_Services_Proc :: proc(state: rawptr, services: Application_Services)
+-Application_Wake_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime)
+-Application_Scheduled_Wake_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, class: Scheduled_Wake_Class)
+-Application_Stop_Proc :: proc(state: rawptr)
+-Application_Menu_Command_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime, command: Application_Command_ID)
+-Application_Close_Result :: enum {Allow, Defer}
+-Application_Close_Requested_Proc :: proc(state: rawptr, rt: ^alicorn.Runtime) -> Application_Close_Result
+-
+-// Scheduled_Wake_Class distinguishes work that should run at a useful cadence
+-// from lower-fidelity work that can wait until the user has been quiet.
+-Scheduled_Wake_Class :: enum {Frequent, Opportunistic}
+-
+-NATIVE_DRAG_AUTOSCROLL_INTERVAL_NS :: u64(16_000_000)
+-
+-Application_Schedule_After_Proc :: proc(data: rawptr, class: Scheduled_Wake_Class, delay_ns: u64) -> bool
+-Application_Cancel_Scheduled_Proc :: proc(data: rawptr, class: Scheduled_Wake_Class) -> bool
+-Application_Scheduler_Stats_Proc :: proc(data: rawptr) -> Application_Scheduler_Stats
+-
+-Application_Scheduler_Stats :: struct {
+-	scheduled:               u64,
+-	coalesced:               u64,
+-	frequent_wakes:          u64,
+-	opportunistic_wakes:     u64,
+-	opportunistic_deferrals: u64,
+-	maximum_lateness_ns:     u64,
+-	frequent_pending:        bool,
+-	opportunistic_pending:   bool,
+-}
+-
+-// Application_Scheduler is a UI-thread-only service. It owns at most one
+-// replaceable deadline for each class; it is deliberately not a task queue.
+-Application_Scheduler :: struct {
+-	data:         rawptr,
+-	schedule:     Application_Schedule_After_Proc,
+-	cancel:       Application_Cancel_Scheduled_Proc,
+-	read_stats:   Application_Scheduler_Stats_Proc,
+-}
+-
+-application_schedule_after :: proc(scheduler: Application_Scheduler, class: Scheduled_Wake_Class, delay_ns: u64) -> bool {
+-	return scheduler.schedule != nil && scheduler.schedule(scheduler.data, class, delay_ns)
+-}
+-
+-application_cancel_scheduled_wake :: proc(scheduler: Application_Scheduler, class: Scheduled_Wake_Class) -> bool {
+-	return scheduler.cancel != nil && scheduler.cancel(scheduler.data, class)
+-}
+-
+-application_scheduler_stats :: proc(scheduler: Application_Scheduler) -> Application_Scheduler_Stats {
+-	if scheduler.read_stats != nil { return scheduler.read_stats(scheduler.data) }
+-	return {}
+-}
+-
+-// Application_Waker is an opaque, thread-safe request to wake the native
+-// application loop. The application can retain and call it from a worker
+-// thread; the SDL host owns the actual event transport.
+-Application_Wake_Callback :: proc(data: rawptr)
+-Application_Waker :: struct {
+-	data: rawptr,
+-	wake: Application_Wake_Callback,
+-}
+-
+-application_wake :: proc(waker: Application_Waker) {
+-	if waker.wake != nil { waker.wake(waker.data) }
+-}
+-
+-// Application is the intended public boundary for a small native Alicorn
+-// program. State is borrowed by callbacks for the duration of Run; retained
+-// runtime nodes never store this pointer.
+-Application :: struct {
+-	state:              rawptr,
+-	title:              string,
+-	width:              int,
+-	height:             int,
+-	menus:              []Application_Menu,
+-	window_decorations: Window_Decoration_Mode,
+-	build:              Application_Build_Proc,
+-	on_text_change:     Application_Text_Change_Proc,
+-	on_text_input:      Application_Text_Input_Proc,
+-	on_text_key:        Application_Text_Key_Proc,
+-	on_key:             Application_Key_Proc,
+-	on_pointer:         Application_Pointer_Proc,
+-	on_drag:            Application_Drag_Proc,
+-	on_scroll:          Application_Scroll_Proc,
+-	on_tick:            Application_Tick_Proc,
+-	on_services:        Application_Services_Proc,
+-	on_start:           Application_Start_Proc,
+-	on_dialog:          Application_Dialog_Proc,
+-	on_wake:            Application_Wake_Proc,
+-	on_scheduled_wake:  Application_Scheduled_Wake_Proc,
+-	on_close_requested: Application_Close_Requested_Proc,
+-	on_stop:            Application_Stop_Proc,
+-	on_menu_command:    Application_Menu_Command_Proc,
+-}
+-
+-Native_Description_Stabilization :: struct {
+-	passes: int,
+-	stable: bool,
+-}
+-
+-// In-build application invalidations describe a newer state than the
+-// description that raised them. Rebuild a small bounded number of times before
+-// the host submits a GPU frame, so transient intermediate descriptions are not
+-// visibly presented. Event/button consumption remains owned by the runtime.
+-native_application_build_until_stable :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	metrics: ^Window_Metrics,
+-	timing: ^Native_Host_Timing,
+-) -> Native_Description_Stabilization {
+-	result := Native_Description_Stabilization{}
+-	for rt.invalidated && result.passes < NATIVE_DESCRIPTION_STABILIZATION_LIMIT {
+-		build_start := time.now()
+-		_ = application.build(application.state, rt, metrics.logical_width, metrics.logical_height, metrics.display_scale)
+-		native_timing_accumulate(&timing.application_build_ns, &timing.application_build_max_ns, u64(time.duration_nanoseconds(time.since(build_start))))
+-		result.passes += 1
+-	}
+-	result.stable = !rt.invalidated
+-	if result.passes > 1 { timing.application_stabilization_rebuilds += u64(result.passes-1) }
+-	if !result.stable { timing.application_stabilization_limit_hits += 1 }
+-	return result
+-}
+-
+-// Native_Menu_Runtime is a host-owned bridge. Platform adapters keep HWND,
+-// NSWindow, HMENU, NSMenu and selectors outside the application API.
+-Native_Menu_Runtime :: struct {
+-	window:          ^sdl3.Window,
+-	application:     ^Application,
+-	runtime:         ^alicorn.Runtime,
+-	platform_data:   rawptr,
+-	pending_command: Application_Command_ID,
+-	has_pending:     bool,
+-}
+-
+-native_menu_dispatch_command :: proc(menu: ^Native_Menu_Runtime, command: Application_Command_ID) {
+-	if menu == nil || menu.application == nil || menu.application.on_menu_command == nil { return }
+-	if menu.runtime != nil {
+-		_, state, found := alicorn.action_lookup(menu.runtime, command)
+-		if found && !state.enabled { return }
+-	}
+-	cause: alicorn.Cause_Scope
+-	if menu.runtime != nil {
+-		cause = alicorn.cause_begin(menu.runtime, .Native_Command, "native menu command", command)
+-	}
+-	menu.application.on_menu_command(menu.application.state, menu.runtime, command)
+-	if menu.runtime != nil { alicorn.invalidate_root(menu.runtime, "application menu command") }
+-	if menu.runtime != nil { alicorn.cause_end(menu.runtime, cause) }
+-}
+-
+-Native_Application_Waker :: struct {
+-	event_type: sdl3.EventType,
+-	active:     bool,
+-}
+-
+-NATIVE_OPPORTUNISTIC_QUIET_NS :: u64(150_000_000)
+-
+-native_application_schedule_after :: proc(data: rawptr, class: Scheduled_Wake_Class, delay_ns: u64) -> bool {
+-	return scheduled_wake_schedule(cast(^Native_Scheduled_Wake_State)data, class, u64(sdl3.GetTicksNS()), delay_ns)
+-}
+-
+-native_application_cancel_scheduled :: proc(data: rawptr, class: Scheduled_Wake_Class) -> bool {
+-	return scheduled_wake_cancel(cast(^Native_Scheduled_Wake_State)data, class)
+-}
+-
+-native_application_scheduler_stats :: proc(data: rawptr) -> Application_Scheduler_Stats {
+-	return scheduled_wake_read_stats(cast(^Native_Scheduled_Wake_State)data)
+-}
+-
+-native_event_is_user_interaction :: proc(kind: sdl3.EventType) -> bool {
+-	#partial switch kind {
+-	case .KEY_DOWN, .KEY_UP, .TEXT_INPUT, .TEXT_EDITING,
+-		.MOUSE_MOTION, .MOUSE_BUTTON_DOWN, .MOUSE_BUTTON_UP, .MOUSE_WHEEL:
+-		return true
+-	}
+-	return false
+-}
+-
+-native_dispatch_scheduled_wakes :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	state: ^Native_Scheduled_Wake_State,
+-	last_interaction_ns: u64,
+-	timing: ^Native_Host_Timing,
+-) {
+-	if application == nil || state == nil || !state.active { return }
+-	classes := [2]Scheduled_Wake_Class{.Frequent, .Opportunistic}
+-	for class in classes {
+-		now_ns := u64(sdl3.GetTicksNS())
+-		if !scheduled_wake_is_due(state, class, now_ns) { continue }
+-		index := scheduled_wake_class_index(class)
+-		if class == .Opportunistic {
+-			deferred_until, defer_work := scheduled_wake_defer_until_quiet(now_ns, last_interaction_ns, NATIVE_OPPORTUNISTIC_QUIET_NS)
+-			if defer_work {
+-				state.deadlines_ns[index] = deferred_until
+-				state.stats.opportunistic_deferrals += 1
+-				timing.opportunistic_deferrals += 1
+-				continue
+-			}
+-		}
+-		deadline_ns := state.deadlines_ns[index]
+-		lateness_ns := u64(0)
+-		if now_ns > deadline_ns { lateness_ns = now_ns-deadline_ns }
+-		scheduled_wake_record_run(state, class, lateness_ns)
+-		timing.scheduled_wakes += 1
+-		timing.maximum_scheduled_lateness_ns = max(timing.maximum_scheduled_lateness_ns, lateness_ns)
+-		if application.on_scheduled_wake != nil {
+-			reason := class == .Frequent ? "frequent scheduled work" : "opportunistic scheduled work"
+-			cause := alicorn.cause_begin(rt, .Scheduled_Wake, reason)
+-			application.on_scheduled_wake(application.state, rt, class)
+-			alicorn.cause_end(rt, cause)
+-		}
+-	}
+-}
+-
+-native_drag_autoscroll_update :: proc(rt: ^alicorn.Runtime, deadline_ns: ^u64, now_ns: u64) {
+-	if deadline_ns == nil { return }
+-	if rt == nil || !alicorn.drag_autoscroll_can_step(rt) {
+-		deadline_ns^ = 0
+-		return
+-	}
+-	if deadline_ns^ == 0 {
+-		deadline_ns^ = now_ns+NATIVE_DRAG_AUTOSCROLL_INTERVAL_NS
+-		return
+-	}
+-	if now_ns < deadline_ns^ { return }
+-	_ = alicorn.drag_autoscroll_step(rt, NATIVE_DRAG_AUTOSCROLL_INTERVAL_NS)
+-	if alicorn.drag_autoscroll_can_step(rt) {
+-		deadline_ns^ = now_ns+NATIVE_DRAG_AUTOSCROLL_INTERVAL_NS
+-	} else {
+-		deadline_ns^ = 0
+-	}
+-}
+-
+-native_application_wake :: proc(data: rawptr) {
+-	state := cast(^Native_Application_Waker)data
+-	if state == nil || !state.active { return }
+-	event := sdl3.Event{type=state.event_type}
+-	_ = sdl3.PushEvent(&event)
+-}
+-
+-native_application_request_quit :: proc(data: rawptr) {
+-	state := cast(^bool)data
+-	if state != nil { state^ = true }
+-}
+-
+-fail :: proc(message: string) -> ! {
+-	fmt.println("SDL validation FAILED:", message, "SDL error:", sdl3.GetError())
+-	os.exit(1)
+-}
+-
+-read_window_metrics :: proc(window: ^sdl3.Window, metrics: ^Window_Metrics) -> bool {
+-	logical_width, logical_height: c.int
+-	pixel_width, pixel_height: c.int
+-	if !sdl3.GetWindowSize(window, &logical_width, &logical_height) {
+-		return false
+-	}
+-	if !sdl3.GetWindowSizeInPixels(window, &pixel_width, &pixel_height) {
+-		return false
+-	}
+-	metrics^ = Window_Metrics{
+-		logical_width = int(logical_width),
+-		logical_height = int(logical_height),
+-		pixel_width = int(pixel_width),
+-		pixel_height = int(pixel_height),
+-		pixel_density = sdl3.GetWindowPixelDensity(window),
+-		display_scale = sdl3.GetWindowDisplayScale(window),
+-	}
+-	return metrics.logical_width > 0 && metrics.logical_height > 0 &&
+-		metrics.pixel_width > 0 && metrics.pixel_height > 0 &&
+-		metrics.pixel_density > 0 && metrics.display_scale > 0
+-}
+-
+-native_live_resize_redraw :: proc(state: ^Native_Live_Resize_State) {
+-	if state == nil || !state.active || state.window == nil || state.device == nil || state.rt == nil ||
+-		state.application == nil || state.metrics == nil || state.text_renderer == nil ||
+-		state.surface_renderer == nil || state.solid_renderer == nil || state.timing == nil ||
+-		state.host_scratch == nil || state.in_flight == nil {
+-		return
+-	}
+-	if state.rendering {
+-		state.pending = true
+-		return
+-	}
+-	state.rendering = true
+-	defer state.rendering = false
+-	for pass in 0..<2 {
+-		state.pending = false
+-		native_live_resize_redraw_once(state)
+-		if !state.pending { return }
+-	}
+-}
+-
+-native_live_resize_redraw_once :: proc(state: ^Native_Live_Resize_State) {
+-	if state == nil || !state.active { return }
+-	frame_start := time.now()
+-	native_host_scratch_reset(state.host_scratch)
+-
+-	current_metrics: Window_Metrics
+-	if !read_window_metrics(state.window, &current_metrics) { return }
+-	cause_scope := alicorn.cause_begin(state.rt, .Host_Event, "SDL live resize expose")
+-	defer alicorn.cause_end(state.rt, cause_scope)
+-	cause := cause_scope.cause
+-	old_metrics := state.metrics^
+-	logical_changed := current_metrics.logical_width != old_metrics.logical_width ||
+-	                   current_metrics.logical_height != old_metrics.logical_height
+-	scale_changed := current_metrics.pixel_density != old_metrics.pixel_density ||
+-	                 current_metrics.display_scale != old_metrics.display_scale
+-	state.metrics^ = current_metrics
+-	if logical_changed {
+-		state.rt.viewport.w = f32(current_metrics.logical_width)
+-		state.rt.viewport.h = f32(current_metrics.logical_height)
+-		alicorn.invalidate_root(state.rt, "SDL live-resize logical size changed")
+-	} else if scale_changed {
+-		alicorn.invalidate_root(state.rt, "SDL live-resize display scale changed")
+-	}
+-	if state.rt.invalidated {
+-		stabilization := native_application_build_until_stable(state.application, state.rt, state.metrics, state.timing)
+-		if !stabilization.stable { return }
+-	}
+-	if state.text_input_state != nil {
+-		sync_text_input_focus(state.window, state.rt, state.text_input_state, state.application)
+-	}
+-	if alicorn.presentation_needs_frame(state.rt) {
+-		presentation_ui, ready := alicorn.begin_presentation_frame(state.rt)
+-		if ready { alicorn.end_presentation_frame(&presentation_ui) }
+-	}
+-
+-	application_submission_pending := alicorn.frame_needs_submission(state.rt)
+-	if len(state.in_flight^) >= 2 {
+-		if !wait_and_retire_oldest(
+-			state.device, state.in_flight,
+-			state.query_before_wait_true, state.query_after_wait_true, state.wait_count,
+-			state.timing,
+-		) {
+-			return
+-		}
+-		if state.retired != nil { state.retired^ += 1 }
+-	}
+-	command := sdl3.AcquireGPUCommandBuffer(state.device)
+-	if command == nil { return }
+-	swapchain: ^sdl3.GPUTexture
+-	swap_w, swap_h: sdl3.Uint32
+-	if !sdl3.AcquireGPUSwapchainTexture(command, state.window, &swapchain, &swap_w, &swap_h) {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		return
+-	}
+-	if swapchain == nil || swap_w == 0 || swap_h == 0 {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		return
+-	}
+-	state.metrics.pixel_width = int(swap_w)
+-	state.metrics.pixel_height = int(swap_h)
+-	scale_x := f32(swap_w)/f32(state.metrics.logical_width)
+-	scale_y := f32(swap_h)/f32(state.metrics.logical_height)
+-	preview_time := u64(sdl3.GetTicksNS())
+-	preview := native_devtools_make_sample(
+-		state.devtools_cursor, state.rt, state.timing, state.text_events,
+-		cause, preview_time, host_wakes=1,
+-	)
+-	preview.gpu_submissions += 1
+-	renderer_metrics_before := native_devtools_renderer_metrics_capture(
+-		state.text_renderer, state.surface_renderer, state.solid_renderer,
+-	)
+-	encode_start := time.now()
+-	hud_vertex_reserve := 0
+-	if state.devtools_hud != nil && state.devtools_hud.visible {
+-		hud_vertex_reserve = NATIVE_DEVTOOLS_HUD_RESERVE_VERTICES
+-	}
+-	if !draw_display_list(
+-		command, swapchain, swap_w, swap_h,
+-		state.text_renderer, state.surface_renderer, state.solid_renderer, state.rt.display[:],
+-		scale_x, scale_y,
+-		debug_bounds=state.debug_bounds,
+-		reserve_solid_vertices=hud_vertex_reserve,
+-		scratch_allocator=state.host_scratch.allocator,
+-	) {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		fail("SDL live-resize display-list draw failed")
+-	}
+-	encode_elapsed := u64(time.duration_nanoseconds(time.since(encode_start)))
+-	if application_submission_pending { state.timing.application_gpu_encode_ns += encode_elapsed }
+-	else { state.timing.devtools_hud_encode_ns += encode_elapsed }
+-	hud_start := time.now()
+-	if !native_devtools_hud_render(
+-		state.devtools_hud, state.solid_renderer, command, swapchain, swap_w, swap_h,
+-		scale_x, scale_y,
+-		state.devtools_recorder, u64(sdl3.GetTicksNS()), preview,
+-		preview_valid=state.devtools_hud != nil && state.devtools_hud.visible,
+-		last_invalidation=state.rt.last_invalidation_reason,
+-	) {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		fail("Alicorn DevTools live-resize HUD draw failed")
+-	}
+-	if !application_submission_pending {
+-		native_devtools_renderer_metrics_restore(
+-			state.text_renderer, state.surface_renderer, state.solid_renderer,
+-			renderer_metrics_before,
+-		)
+-	}
+-	if state.devtools_hud != nil && state.devtools_hud.visible {
+-		state.timing.devtools_hud_encode_ns += u64(time.duration_nanoseconds(time.since(hud_start)))
+-	}
+-	native_timing_accumulate(&state.timing.gpu_encode_ns, &state.timing.gpu_encode_max_ns,
+-		u64(time.duration_nanoseconds(time.since(encode_start))))
+-	submit_start := time.now()
+-	fence := sdl3.SubmitGPUCommandBufferAndAcquireFence(command)
+-	native_timing_accumulate(&state.timing.gpu_submit_ns, &state.timing.gpu_submit_max_ns,
+-		u64(time.duration_nanoseconds(time.since(submit_start))))
+-	if fence == nil { fail("SDL live-resize frame submission failed") }
+-	append(state.in_flight, Native_In_Flight{fence})
+-	native_text_commit_submission(state.text_renderer)
+-	native_surface_commit_submission(state.surface_renderer)
+-	if application_submission_pending {
+-		alicorn.gpu_surface_frame_consumed(state.rt)
+-		alicorn.frame_submission_succeeded(state.rt)
+-		state.rt.stats.gpu_submits += 1
+-	}
+-	if state.submitted != nil { state.submitted^ += 1 }
+-	state.timing.gpu_submissions += 1
+-	if state.max_in_flight != nil && len(state.in_flight^) > state.max_in_flight^ {
+-		state.max_in_flight^ = len(state.in_flight^)
+-	}
+-	native_timing_add_frame(state.timing, u64(time.duration_nanoseconds(time.since(frame_start))))
+-	if state.devtools_recorder != nil && state.devtools_cursor != nil && state.text_events != nil {
+-		native_devtools_record_wake(
+-			state.devtools_recorder, state.devtools_cursor, state.rt, state.timing, state.text_events,
+-			cause, u64(sdl3.GetTicksNS()), 1,
+-		)
+-	}
+-}
+-
+-native_live_resize_event_watch :: proc "c" (userdata: rawptr, event: ^sdl3.Event) -> bool {
+-	// AddEventWatch can run from arbitrary producer threads for most events.
+-	// Filter those without touching host state; SDL guarantees live-resize
+-	// WINDOW_EXPOSED events arrive on the main thread for direct redraw.
+-	if event == nil || event.type != .WINDOW_EXPOSED || event.window.data1 != 1 { return true }
+-	state := cast(^Native_Live_Resize_State)userdata
+-	if state == nil || !state.active || state.window == nil || event.window.windowID != sdl3.GetWindowID(state.window) {
+-		return true
+-	}
+-	if state.rendering {
+-		state.pending = true
+-		return true
+-	}
+-	context = runtime.default_context()
+-	native_live_resize_redraw(state)
+-	return true
+-}
+-
+-print_window_metrics :: proc(label: string, metrics: Window_Metrics) {
+-	fmt.println(
+-		"window_metrics", label,
+-		"logical", metrics.logical_width, "x", metrics.logical_height,
+-		"pixels", metrics.pixel_width, "x", metrics.pixel_height,
+-		"pixel_density", metrics.pixel_density,
+-		"display_scale", metrics.display_scale,
+-	)
+-}
+-
+-pointer_modifiers_from_sdl :: proc(mod: sdl3.Keymod) -> alicorn.Input_Modifiers {
+-	return alicorn.Input_Modifiers{
+-		shift=native_text_modifier(mod, sdl3.KMOD_SHIFT),
+-		control=native_text_modifier(mod, sdl3.KMOD_CTRL),
+-		alt=native_text_modifier(mod, sdl3.KMOD_ALT),
+-		super=native_text_modifier(mod, sdl3.KMOD_GUI),
+-	}
+-}
+-
+-pointer_from_sdl_with_modifiers :: proc(event: sdl3.Event, mod: sdl3.Keymod) -> (value: alicorn.Pointer_Event, ok: bool) {
+-	// SDL mouse coordinates are window-logical coordinates. They are passed
+-	// through unchanged; only the compositor converts logical geometry to pixels.
+-	modifiers := pointer_modifiers_from_sdl(mod)
+-	if event.type == .MOUSE_MOTION {
+-		return alicorn.Pointer_Event{
+-			kind=.Move,
+-			x=event.motion.x,
+-			y=event.motion.y,
+-			modifiers=modifiers,
+-		}, true
+-	}
+-	if event.type == .MOUSE_BUTTON_DOWN {
+-		return alicorn.Pointer_Event{
+-			kind=.Down,
+-			x=event.button.x,
+-			y=event.button.y,
+-			button=int(event.button.button),
+-			modifiers=modifiers,
+-			click_count=event.button.clicks,
+-		}, true
+-	}
+-	if event.type == .MOUSE_BUTTON_UP {
+-		return alicorn.Pointer_Event{
+-			kind=.Up,
+-			x=event.button.x,
+-			y=event.button.y,
+-			button=int(event.button.button),
+-			modifiers=modifiers,
+-			click_count=event.button.clicks,
+-		}, true
+-	}
+-	return alicorn.Pointer_Event{}, false
+-}
+-
+-native_dispatch_drag_event :: proc(application: ^Application, rt: ^alicorn.Runtime) -> bool {
+-	event, pending := alicorn.drag_event_take(rt)
+-	if !pending { return false }
+-	if application != nil && application.on_drag != nil {
+-		application.on_drag(application.state, rt, event)
+-	}
+-	return true
+-}
+-
+-pointer_modifier_state_update :: proc(mod_state: ^sdl3.Keymod, event: sdl3.Event) {
+-	if mod_state == nil { return }
+-	if event.type == .KEY_DOWN || event.type == .KEY_UP {
+-		mod_state^ = event.key.mod
+-	} else if event.type == .WINDOW_FOCUS_LOST {
+-		mod_state^ = {}
+-	} else if event.type == .WINDOW_FOCUS_GAINED {
+-		mod_state^ = sdl3.GetModState()
+-	}
+-}
+-
+-poll_sdl_event :: proc(event: ^sdl3.Event) -> bool {
+-	when ODIN_OS == .Darwin {
+-		// The Darwin host pumps AppKit explicitly above. PeepEvents retrieves
+-		// only what SDL has already translated, so it cannot re-enter the
+-		// blocking SDL_PollEvent -> Cocoa path.
+-		return sdl3.PeepEvents(event, 1, .GETEVENT, sdl3.EventType.FIRST, sdl3.EventType.LAST) > 0
+-	} else {
+-		return sdl3.PollEvent(event)
+-	}
+-}
+-
+-validate_pointer_coordinates :: proc() {
+-	// This is intentionally a native-adapter regression check: a fractional
+-	// logical coordinate must reach Alicorn unchanged, with no Retina scaling.
+-	event := sdl3.Event{}
+-	event.type = .MOUSE_MOTION
+-	event.motion.x = 123.25
+-	event.motion.y = 234.75
+-	pointer, ok := pointer_from_sdl_with_modifiers(event, {})
+-	if !ok || pointer.x != event.motion.x || pointer.y != event.motion.y {
+-		fail("SDL pointer coordinates were scaled or translated before hit testing")
+-	}
+-}
+-
+-logical_to_pixel_bounds :: proc(bounds: alicorn.Rect, scale_x, scale_y: f32) -> (x0, y0, x1, y1: int) {
+-	x0 = int(bounds.x * scale_x)
+-	y0 = int(bounds.y * scale_y)
+-	x1 = int((bounds.x + bounds.w) * scale_x)
+-	y1 = int((bounds.y + bounds.h) * scale_y)
+-	return
+-}
+-
+-validate_pixel_transform :: proc() {
+-	// This guards the compositor boundary independently of SDL window state.
+-	x0, y0, x1, y1 := logical_to_pixel_bounds(alicorn.Rect{10, 20, 100, 50}, 2, 2)
+-	if x0 != 20 || y0 != 40 || x1 != 220 || y1 != 140 {
+-		fail("logical compositor bounds did not scale exactly once")
+-	}
+-}
+-
+-validate_text_pixel_snapping :: proc() {
+-	// Keep the raster phase in the glyph bitmap while the sampled quad starts
+-	// on an integer physical pixel. These boundaries also guard carry from the
+-	// fourth quarter-pixel bucket into the next pixel.
+-	fractions := [4]f32{0.12, 0.26, 0.51, 0.76}
+-	for fractional, expected_bucket in fractions {
+-		pixel_x, bucket := native_text_snap_x(10 + fractional)
+-		if pixel_x != 10 || bucket != u8(expected_bucket) {
+-			fail("text X phase was not quantized to the expected Runa bucket")
+-		}
+-	}
+-	pixel_x, bucket := native_text_snap_x(10.90)
+-	if pixel_x != 11 || bucket != 0 {
+-		fail("text X phase did not carry the rounded fourth bucket")
+-	}
+-	if native_text_snap_y(20.49) != 20 || native_text_snap_y(20.50) != 21 {
+-		fail("text Y origin was not snapped to physical pixels")
+-	}
+-}
+-
+-Native_Text_Input_State :: struct {
+-	active: bool,
+-	owner: alicorn.Node_ID,
+-	composition_owner: alicorn.Node_ID,
+-	window_focused: bool,
+-	last_area: alicorn.Text_Input_Area,
+-	last_area_valid: bool,
+-}
+-
+-// SDL's live-resize expose callback runs while the platform's interactive
+-// sizing loop has control. Keep the host references together so that callback
+-// can rebuild and submit one current frame without entering the normal event
+-// loop recursively.
+-Native_Live_Resize_State :: struct {
+-	active: bool,
+-	rendering: bool,
+-	pending: bool,
+-	window: ^sdl3.Window,
+-	device: ^sdl3.GPUDevice,
+-	rt: ^alicorn.Runtime,
+-	application: ^Application,
+-	metrics: ^Window_Metrics,
+-	text_renderer: ^Native_Text_Renderer,
+-	surface_renderer: ^Native_Surface_Renderer,
+-	solid_renderer: ^Native_Solid_Renderer,
+-	text_input_state: ^Native_Text_Input_State,
+-	timing: ^Native_Host_Timing,
+-	host_scratch: ^Native_Host_Scratch,
+-	in_flight: ^[dynamic; 3]Native_In_Flight,
+-	retired: ^int,
+-	max_in_flight: ^int,
+-	query_before_wait_true: ^int,
+-	query_after_wait_true: ^int,
+-	wait_count: ^int,
+-	submitted: ^int,
+-	text_events: ^Native_Text_Event_Telemetry,
+-	devtools_recorder: ^Native_Flight_Recorder,
+-	devtools_cursor: ^Native_DevTools_Cursor,
+-	devtools_hud: ^Native_DevTools_HUD,
+-	debug_bounds: bool,
+-}
+-
+-native_text_input_owner_is_valid :: proc(rt: ^alicorn.Runtime, id: alicorn.Node_ID) -> bool {
+-	node, ok := rt.nodes[id]
+-	if !ok || !node.active || !node.focusable || node.disabled { return false }
+-	if alicorn.text_input_target_is_suspended(rt, id) { return false }
+-	return node.kind == .Text_Field || alicorn.text_input_target_is_active(rt, id)
+-}
+-
+-native_current_text_input_owner :: proc(rt: ^alicorn.Runtime, state: ^Native_Text_Input_State = nil) -> alicorn.Node_ID {
+-	if state != nil {
+-		if !state.active || !state.window_focused || state.owner == 0 || state.owner != rt.focused { return 0 }
+-		return state.owner if native_text_input_owner_is_valid(rt, state.owner) else 0
+-	}
+-	return rt.focused if native_text_input_owner_is_valid(rt, rt.focused) else 0
+-}
+-
+-native_text_input_area_update_required :: proc(
+-	state: ^Native_Text_Input_State,
+-	area: alicorn.Text_Input_Area,
+-	area_valid: bool,
+-) -> bool {
+-	if !area_valid { return state.last_area_valid }
+-	return !state.last_area_valid || state.last_area != area
+-}
+-
+-native_application_text_input_event :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	owner: alicorn.Node_ID,
+-	event: Application_Text_Input_Event,
+-	require_live_target := true,
+-) -> bool {
+-	if application == nil || application.on_text_input == nil || owner == 0 { return false }
+-	if require_live_target && !alicorn.text_input_target_is_active(rt, owner) { return false }
+-	application.on_text_input(application.state, rt, owner, event)
+-	reason := "application text input"
+-	#partial switch event.kind {
+-	case .Preedit: reason = "application text preedit"
+-	case .Cancel: reason = "application text composition canceled"
+-	}
+-	alicorn.invalidate_root(rt, reason)
+-	return true
+-}
+-
+-native_dispatch_generic_text_input_event :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	state: ^Native_Text_Input_State,
+-	event: Application_Text_Input_Event,
+-) -> bool {
+-	owner := native_current_text_input_owner(rt, state)
+-	if !alicorn.text_input_target_is_active(rt, owner) { return false }
+-	normalized_event := event
+-	if normalized_event.kind == .Preedit && len(normalized_event.text) == 0 { normalized_event.kind = .Cancel }
+-	delivered := native_application_text_input_event(application, rt, owner, normalized_event)
+-	if !delivered { return false }
+-	if state != nil {
+-		switch normalized_event.kind {
+-		case .Preedit: state.composition_owner = owner
+-		case .Commit, .Cancel: state.composition_owner = 0
+-		}
+-	}
+-	return true
+-}
+-
+-native_application_text_key_event :: proc(
+-	key: sdl3.Keycode,
+-	mod: sdl3.Keymod,
+-) -> (event: Application_Text_Key_Event, mapped: bool) {
+-	word := native_text_word_modifier(mod)
+-	line := native_text_line_modifier(mod)
+-	document := native_text_document_modifier(mod)
+-	switch key {
+-	case sdl3.K_LEFT:
+-		if line { event.key = .Line_Start }
+-		else if word { event.key = .Word_Left }
+-		else { event.key = .Left }
+-	case sdl3.K_RIGHT:
+-		if line { event.key = .Line_End }
+-		else if word { event.key = .Word_Right }
+-		else { event.key = .Right }
+-	case sdl3.K_HOME: event.key = .Document_Start if document else .Home
+-	case sdl3.K_END: event.key = .Document_End if document else .End
+-	case sdl3.K_UP:
+-		when ODIN_OS == .Darwin {
+-			event.key = .Document_Start if document else .Up
+-		} else { event.key = .Up }
+-	case sdl3.K_DOWN:
+-		when ODIN_OS == .Darwin {
+-			event.key = .Document_End if document else .Down
+-		} else { event.key = .Down }
+-	case sdl3.K_PAGEUP: event.key = .Page_Up
+-	case sdl3.K_PAGEDOWN: event.key = .Page_Down
+-	case sdl3.K_BACKSPACE:
+-		if line { event.key = .Delete_Line_Backward }
+-		else if word { event.key = .Delete_Word_Backward }
+-		else { event.key = .Backspace }
+-	case sdl3.K_DELETE:
+-		if line { event.key = .Delete_Line_Forward }
+-		else if word { event.key = .Delete_Word_Forward }
+-		else { event.key = .Delete }
+-	case sdl3.K_TAB: event.key = .Tab
+-	case: return {}, false
+-	}
+-	event.shift = native_text_modifier(mod, sdl3.KMOD_SHIFT)
+-	event.control = native_text_modifier(mod, sdl3.KMOD_CTRL)
+-	event.alt = native_text_modifier(mod, sdl3.KMOD_ALT)
+-	event.super = native_text_modifier(mod, sdl3.KMOD_GUI)
+-	return event, true
+-}
+-
+-native_dispatch_application_text_key :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	key: sdl3.Keycode,
+-	mod: sdl3.Keymod,
+-) -> bool {
+-	if application == nil || application.on_text_key == nil || rt == nil { return false }
+-	event, mapped := native_application_text_key_event(key, mod)
+-	if !mapped { return false }
+-	owner := rt.focused
+-	node, ok := rt.nodes[owner]
+-	if !ok || !node.active || node.kind == .Text_Field || !alicorn.text_input_target_is_active(rt, owner) {
+-		return false
+-	}
+-	if !application.on_text_key(application.state, rt, owner, event) { return false }
+-	alicorn.invalidate_root(rt, "application handled focused text key")
+-	return true
+-}
+-
+-// A generic focused text owner gets first refusal on Tab. If it declines the
+-// key, retain the host's normal forward/backward focus traversal behavior.
+-native_dispatch_application_text_key_or_focus_traverse :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	key: sdl3.Keycode,
+-	mod: sdl3.Keymod,
+-) -> bool {
+-	if native_dispatch_application_text_key(application, rt, key, mod) { return true }
+-	if key != sdl3.K_TAB || rt == nil { return false }
+-	direction: alicorn.Focus_Direction = .Next
+-	if native_text_modifier(mod, sdl3.KMOD_SHIFT) { direction = .Previous }
+-	return alicorn.focus_traverse(rt, direction) != 0
+-}
+-
+-native_cancel_application_text_composition :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	state: ^Native_Text_Input_State,
+-) {
+-	if state.composition_owner == 0 { return }
+-	owner := state.composition_owner
+-	state.composition_owner = 0
+-	_ = native_application_text_input_event(
+-		application,
+-		rt,
+-		owner,
+-		Application_Text_Input_Event{kind=.Cancel},
+-		require_live_target=false,
+-	)
+-}
+-
+-native_cancel_current_text_composition :: proc(
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	state: ^Native_Text_Input_State,
+-	reason := "text composition canceled by text-input lifecycle",
+-) {
+-	if state.composition_owner != 0 {
+-		native_cancel_application_text_composition(application, rt, state)
+-		return
+-	}
+-	if node, ok := rt.nodes[state.owner]; ok && node.active && node.kind == .Text_Field && node.composition.active {
+-		_ = alicorn.cancel_text_composition(rt, state.owner, reason)
+-	}
+-}
+-
+-sync_text_input_focus :: proc(
+-	window: ^sdl3.Window,
+-	rt: ^alicorn.Runtime,
+-	state: ^Native_Text_Input_State,
+-	application: ^Application = nil,
+-) {
+-	desired := rt.focused
+-	if !state.window_focused || !native_text_input_owner_is_valid(rt, desired) { desired = 0 }
+-	if desired != 0 {
+-		if node, ok := rt.nodes[desired]; ok && node.kind != .Text_Field && (application == nil || application.on_text_input == nil) {
+-			desired = 0
+-		}
+-	}
+-	if desired != state.owner {
+-		native_cancel_current_text_composition(application, rt, state)
+-		if state.active {
+-			// Clear platform preedit before changing the Alicorn owner; otherwise
+-			// a late platform event could be applied to the wrong target.
+-			if !sdl3.ClearComposition(window) { fail("SDL_ClearComposition failed during text-input focus transfer") }
+-			if !sdl3.StopTextInput(window) { fail("SDL_StopTextInput failed during text-input focus transfer") }
+-			state.active = false
+-		}
+-		state.owner = 0
+-		state.last_area_valid = false
+-		if desired != 0 {
+-			if !sdl3.StartTextInput(window) { fail("SDL_StartTextInput failed for focused text-input target") }
+-			state.active = true
+-			state.owner = desired
+-		}
+-	}
+-	if state.active && state.owner != 0 {
+-		area, ok := alicorn.text_input_area(rt, state.owner)
+-		if !ok {
+-			if native_text_input_area_update_required(state, {}, false) {
+-				if !sdl3.SetTextInputArea(window, nil, 0) {
+-					fail("SDL_SetTextInputArea failed while clearing stale candidate-window geometry")
+-				}
+-				state.last_area = alicorn.Text_Input_Area{}
+-				state.last_area_valid = false
+-			}
+-			return
+-		}
+-		width := int(area.rect.w)
+-		height := int(area.rect.h)
+-		if width < 1 { width = 1 }
+-		if height < 1 { height = 1 }
+-		input_area := sdl3.Rect{
+-			x=c.int(area.rect.x), y=c.int(area.rect.y), w=c.int(width), h=c.int(height),
+-		}
+-		if native_text_input_area_update_required(state, area, true) {
+-			if !sdl3.SetTextInputArea(window, &input_area, c.int(area.cursor_x)) {
+-				fail("SDL_SetTextInputArea failed for focused text-input target")
+-			}
+-			state.last_area = area
+-			state.last_area_valid = true
+-		}
+-	}
+-}
+-
+-adopt_text_change :: proc(app_text: ^string, rt: ^alicorn.Runtime, change: alicorn.Text_Change) {
+-	// Text_Change.text is a runtime-owned product. Copy it into the host's
+-	// ordinary application state before releasing it through the allocator that
+-	// created it; never transfer the runtime allocation across this boundary.
+-	if change.changed {
+-		copy, err := strings.clone(change.text)
+-		if err == nil {
+-			if len(app_text^) > 0 { delete(app_text^) }
+-			app_text^ = copy
+-		}
+-	}
+-	if len(change.text) > 0 { delete(change.text, rt.persistent_allocator) }
+-}
+-
+-native_dispatch_text_change :: proc(
+-	app_text: ^string,
+-	application: ^Application,
+-	rt: ^alicorn.Runtime,
+-	change: alicorn.Text_Change,
+-	telemetry: ^Native_Text_Event_Telemetry = nil,
+-) {
+-	if telemetry != nil {
+-		telemetry.text_change_dispatches += 1
+-		if change.changed { telemetry.text_changes += 1 }
+-	}
+-	if application != nil {
+-		if application.on_text_change != nil {
+-			// The callback borrows the runtime-owned text for the duration of the
+-			// call. It must clone any value it keeps; the host releases the product
+-			// through rt.persistent_allocator after the callback returns.
+-			application.on_text_change(application.state, rt, change)
+-		}
+-		if len(change.text) > 0 { delete(change.text, rt.persistent_allocator) }
+-	} else {
+-		adopt_text_change(app_text, rt, change)
+-	}
+-}
+-
+-native_text_modifier :: proc(mod: sdl3.Keymod, mask: sdl3.Keymod) -> bool {
+-	return (mod & mask) != sdl3.Keymod{}
+-}
+-
+-native_text_primary_modifier :: proc(mod: sdl3.Keymod) -> bool {
+-	when ODIN_OS == .Darwin {
+-		return native_text_modifier(mod, sdl3.KMOD_GUI)
+-	} else {
+-		return native_text_modifier(mod, sdl3.KMOD_CTRL)
+-	}
+-}
+-
+-native_text_word_modifier :: proc(mod: sdl3.Keymod) -> bool {
+-	when ODIN_OS == .Darwin {
+-		return native_text_modifier(mod, sdl3.KMOD_ALT)
+-	} else {
+-		return native_text_modifier(mod, sdl3.KMOD_CTRL)
+-	}
+-}
+-
+-native_text_line_modifier :: proc(mod: sdl3.Keymod) -> bool {
+-	when ODIN_OS == .Darwin {
+-		return native_text_modifier(mod, sdl3.KMOD_GUI)
+-	} else {
+-		return false
+-	}
+-}
+-
+-native_text_document_modifier :: proc(mod: sdl3.Keymod) -> bool {
+-	when ODIN_OS == .Darwin {
+-		return native_text_primary_modifier(mod)
+-	} else {
+-		return native_text_modifier(mod, sdl3.KMOD_CTRL)
+-	}
+-}
+-
+-native_text_apply_key_edit :: proc(
+-	rt: ^alicorn.Runtime,
+-	node: alicorn.Node_ID,
+-	kind: alicorn.Text_Edit_Kind,
+-	word: bool,
+-	app_text: ^string,
+-	application: ^Application,
+-	telemetry: ^Native_Text_Event_Telemetry = nil,
+-) -> bool {
+-	field, ok := rt.nodes[node]
+-	if !ok || !field.active || field.kind != .Text_Field || field.composition.active { return false }
+-	if telemetry != nil { telemetry.text_edit_key_events += 1 }
+-	command: alicorn.Text_Command = .Delete_Backward if kind == .Backspace else .Delete_Forward
+-	if word {
+-		command = .Delete_Word_Backward if kind == .Backspace else .Delete_Word_Forward
+-	}
+-	change := alicorn.process_text_command(rt, node, command)
+-	native_dispatch_text_change(app_text, application, rt, change, telemetry)
+-	return true
+-}
+-
+-native_text_apply_key_navigation :: proc(
+-	rt: ^alicorn.Runtime,
+-	node: alicorn.Node_ID,
+-	key: sdl3.Keycode,
+-	mod: sdl3.Keymod,
+-	telemetry: ^Native_Text_Event_Telemetry = nil,
+-) -> bool {
+-	field, ok := rt.nodes[node]
+-	if !ok || !field.active || field.kind != .Text_Field || field.composition.active { return false }
+-	shift := native_text_modifier(mod, sdl3.KMOD_SHIFT)
+-	primary := native_text_primary_modifier(mod)
+-	word := native_text_word_modifier(mod)
+-	line := native_text_line_modifier(mod)
+-	selection_nonempty := field.selection_anchor.byte != field.selection_focus.byte
+-	target := field.caret.byte
+-	handled := true
+-	switch key {
+-	case sdl3.K_LEFT, sdl3.K_RIGHT:
+-		direction := -1 if key == sdl3.K_LEFT else 1
+-		if !shift && selection_nonempty {
+-			target = field.selection_anchor.byte if direction < 0 else field.selection_focus.byte
+-			if field.selection_anchor.byte > field.selection_focus.byte {
+-				target = field.selection_focus.byte if direction < 0 else field.selection_anchor.byte
+-			}
+-		} else if line {
+-			target = 0 if direction < 0 else len(field.text)
+-			_ = alicorn.set_text_caret(rt, node, target)
+-			if telemetry != nil { telemetry.text_navigation_key_events += 1 }
+-			return true
+-		} else if !shift {
+-			command: alicorn.Text_Command = .Move_Left if direction < 0 else .Move_Right
+-			if word { command = .Move_Word_Left if direction < 0 else .Move_Word_Right }
+-			_ = alicorn.process_text_command(rt, node, command)
+-			if telemetry != nil {
+-				telemetry.text_navigation_key_events += 1
+-				if word { telemetry.text_word_key_events += 1 }
+-			}
+-			return true
+-		} else if line {
+-			target = 0 if direction < 0 else len(field.text)
+-		} else if word {
+-			position := alicorn.text_move_word(field.text, alicorn.Text_Position{target, .Leading}, direction, rt.scratch_allocator)
+-			target = position.byte
+-		} else {
+-			position := alicorn.text_move_logical(field.text, alicorn.Text_Position{target, .Leading}, direction)
+-			target = position.byte
+-		}
+-	case sdl3.K_HOME:
+-		target = 0
+-	case sdl3.K_END:
+-		target = len(field.text)
+-	case sdl3.K_A:
+-		if !primary { handled = false }
+-		if handled {
+-			_ = alicorn.set_text_selection(rt, node, 0, len(field.text))
+-			if telemetry != nil { telemetry.text_selection_key_events += 1 }
+-			return true
+-		}
+-	case:
+-		handled = false
+-	}
+-	if !handled { return false }
+-	if shift {
+-		_ = alicorn.set_text_selection(rt, node, field.selection_anchor.byte, target)
+-		if telemetry != nil { telemetry.text_selection_key_events += 1 }
+-	} else {
+-		_ = alicorn.set_text_caret(rt, node, target)
+-	}
+-	if telemetry != nil {
+-		telemetry.text_navigation_key_events += 1
+-		if word { telemetry.text_word_key_events += 1 }
+-	}
+-	return true
+-}
+-
+-pump_events :: proc(
+-	window: ^sdl3.Window,
+-	rt: ^alicorn.Runtime,
+-	metrics: ^Window_Metrics,
+-	quit_requested: ^bool,
+-	logical_resize_events, pixel_resize_events, scale_events: ^int,
+-	text_input_events, composition_events: ^int,
+-	app_text: ^string,
+-	manual_log := false,
+-	application: ^Application = nil,
+-	diagnostics_capture_requested: ^bool = nil,
+-	debug_bounds: ^bool = nil,
+-	telemetry: ^Native_Text_Event_Telemetry = nil,
+-	wake_event: sdl3.EventType = .FIRST,
+-	wake_event_enabled := false,
+-	wait_for_event := false,
+-	event_waits: ^u64 = nil,
+-	wake_events: ^u64 = nil,
+-	wait_timeout_ms: sdl3.Sint32 = -1,
+-	wait_timed_out: ^bool = nil,
+-	native_menu: ^Native_Menu_Runtime = nil,
+-	last_user_interaction_ns: ^u64 = nil,
+-	text_input_state: ^Native_Text_Input_State = nil,
+-	pointer_modifier_state: ^sdl3.Keymod = nil,
+-	devtools_hud: ^Native_DevTools_HUD = nil,
+-	devtools_hud_redraw_pending: ^bool = nil,
+-	devtools_last_cause: ^alicorn.Cause_Context = nil,
+-) {
+-	if telemetry != nil { telemetry.events_this_pump = 0 }
+-	mod_state := sdl3.GetModState()
+-	if pointer_modifier_state != nil { mod_state = pointer_modifier_state^ }
+-	event: sdl3.Event
+-	when ODIN_OS == .Darwin {
+-		pump_platform_events()
+-	}
+-	has_event := false
+-	if wait_for_event {
+-		if event_waits != nil { event_waits^ += 1 }
+-		if wait_timeout_ms >= 0 {
+-			has_event = sdl3.WaitEventTimeout(&event, wait_timeout_ms)
+-		} else {
+-			has_event = sdl3.WaitEvent(&event)
+-		}
+-		if !has_event && wait_timed_out != nil { wait_timed_out^ = true }
+-	} else {
+-		has_event = poll_sdl_event(&event)
+-	}
+-	for has_event {
+-		// SDL mouse-button events carry no modifier snapshot. Track keyboard
+-		// snapshots in queue order; GetModState seeds the pump and focus gain.
+-		pointer_modifier_state_update(pointer_modifier_state, event)
+-		if event.type == .KEY_DOWN || event.type == .KEY_UP ||
+-			event.type == .WINDOW_FOCUS_LOST || event.type == .WINDOW_FOCUS_GAINED {
+-			if pointer_modifier_state != nil { mod_state = pointer_modifier_state^ }
+-		}
+-		if telemetry != nil { telemetry.events_received_sequence += 1 }
+-		if last_user_interaction_ns != nil && native_event_is_user_interaction(event.type) {
+-			last_user_interaction_ns^ = u64(sdl3.GetTicksNS())
+-		}
+-		if telemetry != nil {
+-			event_timestamp: u64 = 0
+-			#partial switch event.type {
+-			case .KEY_DOWN, .KEY_UP: event_timestamp = u64(event.key.timestamp)
+-			case .TEXT_INPUT: event_timestamp = u64(event.text.timestamp)
+-			case .TEXT_EDITING: event_timestamp = u64(event.edit.timestamp)
+-			case .MOUSE_MOTION: event_timestamp = u64(event.motion.timestamp)
+-			case .MOUSE_BUTTON_DOWN, .MOUSE_BUTTON_UP: event_timestamp = u64(event.button.timestamp)
+-			case .MOUSE_WHEEL: event_timestamp = u64(event.wheel.timestamp)
+-			}
+-			if event_timestamp != 0 { native_note_input_event(telemetry, event_timestamp) }
+-		}
+-		if manual_log {
+-			if event.type == .WINDOW_FOCUS_GAINED {
+-				fmt.println("sdl_event", "WINDOW_FOCUS_GAINED")
+-			} else if event.type == .WINDOW_FOCUS_LOST {
+-				fmt.println("sdl_event", "WINDOW_FOCUS_LOST")
+-			} else if event.type == .MOUSE_BUTTON_DOWN || event.type == .MOUSE_BUTTON_UP {
+-				fmt.println("sdl_event", "MOUSE_BUTTON", "x", event.button.x, "y", event.button.y, "button", event.button.button, "down", event.button.down)
+-			}
+-		}
+-		if event.type == .QUIT || event.type == .WINDOW_CLOSE_REQUESTED {
+-			close_result := Application_Close_Result.Allow
+-			if application != nil && application.on_close_requested != nil {
+-				close_result = application.on_close_requested(application.state, rt)
+-			}
+-			if close_result == .Allow { quit_requested^ = true }
+-		}
+-		if event.type == .WINDOW_FOCUS_LOST {
+-			alicorn.context_menu_close(rt)
+-			if text_input_state != nil {
+-				text_input_state.window_focused = false
+-				native_cancel_current_text_composition(application, rt, text_input_state, "window focus lost")
+-			}
+-			// SDL releases its automatic mouse capture when focus leaves the
+-			// window. Drop the matching retained press/drag state as well so a
+-			// later motion cannot resume an abandoned scrollbar or split drag.
+-			captured := rt.captured_node
+-			cancel_cause := alicorn.pointer_cause_begin(rt, .Cancel)
+-			if devtools_last_cause != nil { devtools_last_cause^ = cancel_cause.cause }
+-			_ = alicorn.cancel_pointer_capture(rt)
+-			_ = native_dispatch_drag_event(application, rt)
+-			if application != nil && application.on_pointer != nil {
+-				application.on_pointer(application.state, rt, alicorn.Pointer_Event{kind=.Cancel}, captured)
+-			}
+-			alicorn.cause_end(rt, cancel_cause)
+-		}
+-		if event.type == .WINDOW_FOCUS_GAINED && text_input_state != nil {
+-			text_input_state.window_focused = true
+-		}
+-		if application != nil && application.on_wake != nil && wake_event_enabled && event.type == wake_event {
+-			if wake_events != nil { wake_events^ += 1 }
+-			wake_cause := alicorn.cause_begin(rt, .Async_Wake, "application wake event")
+-			if devtools_last_cause != nil { devtools_last_cause^ = wake_cause.cause }
+-			application.on_wake(application.state, rt)
+-			alicorn.cause_end(rt, wake_cause)
+-		}
+-		if pointer, ok := pointer_from_sdl_with_modifiers(event, mod_state); ok {
+-			pointer_cause := alicorn.pointer_cause_begin(rt, pointer.kind)
+-			if devtools_last_cause != nil { devtools_last_cause^ = pointer_cause.cause }
+-			target := alicorn.process_pointer(rt, pointer)
+-			drag_event_dispatched := native_dispatch_drag_event(application, rt)
+-			drag_consumed := drag_event_dispatched || alicorn.drag_is_active(rt)
+-			if application != nil && application.on_pointer != nil && !alicorn.context_menu_pointer_consumed(rt) && !drag_consumed {
+-				application.on_pointer(application.state, rt, pointer, target)
+-			}
+-			alicorn.cause_end(rt, pointer_cause)
+-		}
+-		if application != nil && event.type == .MOUSE_WHEEL {
+-			scroll_cause := alicorn.cause_begin(rt, .Scroll, "mouse wheel")
+-			if devtools_last_cause != nil { devtools_last_cause^ = scroll_cause.cause }
+-			delta_x := event.wheel.x
+-			delta_y := event.wheel.y
+-			ticks_x := int(event.wheel.integer_x)
+-			ticks_y := int(event.wheel.integer_y)
+-			mod := sdl3.GetModState()
+-			modifiers := alicorn.Input_Modifiers{
+-				shift=native_text_modifier(mod, sdl3.KMOD_SHIFT),
+-				control=native_text_modifier(mod, sdl3.KMOD_CTRL),
+-				alt=native_text_modifier(mod, sdl3.KMOD_ALT),
+-				super=native_text_modifier(mod, sdl3.KMOD_GUI),
+-			}
+-			// SDL already reports the platform's chosen scroll direction. Keep
+-			// precise deltas and the native natural-scroll preference intact;
+-			// retained regions apply their own logical offset convention.
+-			dispatched_to_scroll_region := alicorn.process_scroll(rt, alicorn.Scroll_Event{
+-				delta_x=delta_x,
+-				delta_y=delta_y,
+-				ticks_x=ticks_x,
+-				ticks_y=ticks_y,
+-				x=event.wheel.mouse_x,
+-				y=event.wheel.mouse_y,
+-				modifiers=modifiers,
+-			})
+-			if !dispatched_to_scroll_region && application.on_scroll != nil {
+-				application.on_scroll(application.state, rt, alicorn.Scroll_Event{
+-					delta_x=delta_x,
+-					delta_y=delta_y,
+-					ticks_x=ticks_x,
+-					ticks_y=ticks_y,
+-					x=event.wheel.mouse_x,
+-					y=event.wheel.mouse_y,
+-					modifiers=modifiers,
+-				})
+-			}
+-			alicorn.cause_end(rt, scroll_cause)
+-		}
+-		if event.type == .KEY_DOWN && event.key.down {
+-			key_cause := alicorn.cause_begin(rt, .Keyboard, "SDL key down")
+-			if devtools_last_cause != nil { devtools_last_cause^ = key_cause.cause }
+-			context_menu_handled := alicorn.context_menu_handle_key(rt, native_context_menu_key_from_sdl(event.key.key))
+-			drag_cancelled := false
+-			if !context_menu_handled && event.key.key == sdl3.K_ESCAPE && alicorn.drag_is_active(rt) {
+-				_ = alicorn.drag_cancel(rt)
+-				_ = native_dispatch_drag_event(application, rt)
+-				drag_cancelled = true
+-			}
+-			menu_shortcut_handled := !context_menu_handled && !drag_cancelled && native_menu_try_shortcut(native_menu, int(event.key.key), event.key.mod)
+-			devtools_hotkey_handled := false
+-			if !menu_shortcut_handled && event.key.key == sdl3.K_F10 &&
+-				!native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) && !event.key.repeat && devtools_hud != nil {
+-				native_devtools_hud_toggle(devtools_hud)
+-				if devtools_hud_redraw_pending != nil { devtools_hud_redraw_pending^ = true }
+-				devtools_hotkey_handled = true
+-			}
+-			runtime_key_handled := context_menu_handled || drag_cancelled || menu_shortcut_handled || devtools_hotkey_handled
+-			if !runtime_key_handled && event.key.key == sdl3.K_F10 &&
+-				native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) && !event.key.repeat &&
+-				application != nil && application.on_key != nil {
+-				runtime_key_handled = application.on_key(application.state, rt, .Context_Menu)
+-				if runtime_key_handled { alicorn.invalidate_root(rt, "application opened context menu from keyboard") }
+-			}
+-			// Let transient application UI intercept navigation and dismissal
+-			// while a text-input owner has focus. Returning false preserves the
+-			// normal caret/composition behavior below.
+-			if !runtime_key_handled && application != nil && application.on_key != nil {
+-				text_input_focused := native_current_text_input_owner(rt, text_input_state) != 0
+-				composition_active := false
+-				if node, ok := rt.nodes[rt.focused]; ok {
+-					composition_active = node.composition.active
+-				}
+-				if text_input_state != nil && text_input_state.composition_owner == rt.focused {
+-					composition_active = true
+-				}
+-				if text_input_focused {
+-					application_key: Application_Key
+-					mapped := true
+-					switch event.key.key {
+-					case sdl3.K_UP: application_key = .Up
+-					case sdl3.K_DOWN: application_key = .Down
+-					case sdl3.K_PAGEUP: application_key = .Page_Up
+-					case sdl3.K_PAGEDOWN: application_key = .Page_Down
+-					case sdl3.K_ESCAPE: application_key = .Escape
+-					case sdl3.K_RETURN, sdl3.K_KP_ENTER:
+-						application_key = native_text_field_return_key(native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT))
+-					case sdl3.K_O:
+-						if len(application.menus) == 0 && native_text_primary_modifier(event.key.mod) { application_key = .Open_Repository }
+-						else { mapped = false }
+-					case sdl3.K_P:
+-						if len(application.menus) == 0 && native_text_primary_modifier(event.key.mod) && native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) {
+-							application_key = .Open_Command_Palette
+-						} else { mapped = false }
+-					case sdl3.K_F:
+-						if native_text_primary_modifier(event.key.mod) {
+-							application_key = .Workspace_Search if native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) else .Find
+-						} else { mapped = false }
+-					case sdl3.K_F2: application_key = .Workspace_Rename
+-					case sdl3.K_F3:
+-						application_key = .Find_Previous if native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) else .Find_Next
+-					case: mapped = false
+-					}
+-					if mapped && application_key_can_preempt_text_field(application_key, composition_active) &&
+-						application.on_key(application.state, rt, application_key) {
+-						runtime_key_handled = true
+-						alicorn.invalidate_root(rt, "application handled focused text-field key")
+-					}
+-				}
+-			}
+-			if !runtime_key_handled {
+-				runtime_key_handled = native_dispatch_application_text_key_or_focus_traverse(
+-					application,
+-					rt,
+-					event.key.key,
+-					event.key.mod,
+-				)
+-			}
+-			if event.key.key == sdl3.K_F12 && diagnostics_capture_requested != nil {
+-				diagnostics_capture_requested^ = true
+-				fmt.println("alicorn_diagnostics", "capture_requested", "F12")
+-			}
+-			if event.key.key == sdl3.K_F11 && debug_bounds != nil {
+-				debug_bounds^ = !debug_bounds^
+-				alicorn.request_presentation(rt)
+-				fmt.println("alicorn_diagnostics", "debug_bounds", debug_bounds^)
+-			}
+-			modifier_key := false
+-			switch event.key.key {
+-			case sdl3.K_LCTRL, sdl3.K_LSHIFT, sdl3.K_LALT, sdl3.K_LGUI,
+-				sdl3.K_RCTRL, sdl3.K_RSHIFT, sdl3.K_RALT, sdl3.K_RGUI:
+-				modifier_key = true
+-			}
+-			if manual_log && (!event.key.repeat || !modifier_key) {
+-				composition_active := false
+-				if node, ok := rt.nodes[rt.focused]; ok {
+-					composition_active = node.composition.active
+-				}
+-				fmt.println("sdl_event", "KEY_DOWN", "key", event.key.key, "repeat", event.key.repeat, "composition_active", composition_active)
+-			}
+-			if !runtime_key_handled {
+-				runtime_key_handled = native_route_focused_control_key(rt, event.key.key)
+-			}
+-			if !runtime_key_handled && event.key.key == sdl3.K_ESCAPE {
+-				if alicorn.cancel_text_composition(rt, rt.focused, "Escape canceled text composition") {
+-					if !sdl3.ClearComposition(window) { fail("SDL_ClearComposition failed for Escape") }
+-					runtime_key_handled = true
+-				} else if text_input_state != nil && text_input_state.composition_owner == rt.focused {
+-					native_cancel_application_text_composition(application, rt, text_input_state)
+-					if !sdl3.ClearComposition(window) { fail("SDL_ClearComposition failed for Escape") }
+-					runtime_key_handled = true
+-				}
+-			} else if !runtime_key_handled {
+-				if node, ok := rt.nodes[rt.focused]; ok && node.active && node.kind == .Text_Field && !node.composition.active {
+-					handled := true
+-					word_modifier := native_text_word_modifier(event.key.mod)
+-					switch event.key.key {
+-					case sdl3.K_BACKSPACE:
+-						native_text_apply_key_edit(rt, rt.focused, .Backspace, word_modifier, app_text, application, telemetry)
+-					case sdl3.K_DELETE:
+-						native_text_apply_key_edit(rt, rt.focused, .Delete, word_modifier, app_text, application, telemetry)
+-					case:
+-						handled = native_text_apply_key_navigation(rt, rt.focused, event.key.key, event.key.mod, telemetry)
+-					}
+-					if manual_log && handled {
+-						fmt.println("alicorn_key_handled", "key", event.key.key, "text", app_text^)
+-					}
+-				}
+-			}
+-			if application != nil && !runtime_key_handled {
+-				text_input_focused := native_current_text_input_owner(rt, text_input_state) != 0
+-				if !text_input_focused {
+-					application_key: Application_Key
+-					handled := true
+-					switch event.key.key {
+-					case sdl3.K_LEFT: application_key = .Left
+-					case sdl3.K_RIGHT: application_key = .Right
+-					case sdl3.K_UP: application_key = .Up
+-					case sdl3.K_DOWN: application_key = .Down
+-					case sdl3.K_PAGEUP: application_key = .Page_Up
+-					case sdl3.K_PAGEDOWN: application_key = .Page_Down
+-					case sdl3.K_HOME: application_key = .Home
+-					case sdl3.K_END: application_key = .End
+-					case sdl3.K_1: application_key = .Command_1
+-					case sdl3.K_2: application_key = .Command_2
+-					case sdl3.K_3: application_key = .Command_3
+-					case sdl3.K_SPACE: application_key = .Toggle
+-					case sdl3.K_ESCAPE: application_key = .Escape
+-					case sdl3.K_RETURN, sdl3.K_KP_ENTER: application_key = .Return
+-					case sdl3.K_P:
+-						if len(application.menus) == 0 && native_text_primary_modifier(event.key.mod) && native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) {
+-							application_key = .Open_Command_Palette
+-						} else { handled = false }
+-					case sdl3.K_F:
+-						if native_text_primary_modifier(event.key.mod) {
+-							application_key = .Workspace_Search if native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) else .Find
+-						} else {
+-							application_key = .Fit_Selection
+-						}
+-					case sdl3.K_F3:
+-						application_key = .Find_Previous if native_text_modifier(event.key.mod, sdl3.KMOD_SHIFT) else .Find_Next
+-					case sdl3.K_F2: application_key = .Workspace_Rename
+-					case sdl3.K_O:
+-						if len(application.menus) == 0 && native_text_primary_modifier(event.key.mod) {
+-							application_key = .Open_Repository
+-						} else {
+-							handled = false
+-						}
+-					case: handled = false
+-					}
+-					if handled && application.on_key != nil && application.on_key(application.state, rt, application_key) {
+-						alicorn.invalidate_root(rt, "application keyboard command")
+-					}
+-				}
+-			}
+-			alicorn.cause_end(rt, key_cause)
+-		}
+-
+-		#partial switch event.type {
+-		case .WINDOW_RESIZED:
+-			host_cause := alicorn.cause_begin(rt, .Host_Event, "window resized")
+-			if devtools_last_cause != nil { devtools_last_cause^ = host_cause.cause }
+-			// data1/data2 are logical window coordinates for this event.
+-			metrics.logical_width = int(event.window.data1)
+-			metrics.logical_height = int(event.window.data2)
+-			logical_resize_events^ += 1
+-			rt.viewport.w = f32(metrics.logical_width)
+-			rt.viewport.h = f32(metrics.logical_height)
+-			alicorn.invalidate_root(rt, "SDL logical window size changed")
+-			alicorn.cause_end(rt, host_cause)
+-		case .WINDOW_PIXEL_SIZE_CHANGED, .WINDOW_METAL_VIEW_RESIZED:
+-			host_cause := alicorn.cause_begin(rt, .Host_Event, "drawable size changed")
+-			if devtools_last_cause != nil { devtools_last_cause^ = host_cause.cause }
+-			// data1/data2 are physical drawable pixels for these events. Do not
+-			// feed them into the logical layout viewport.
+-			metrics.pixel_width = int(event.window.data1)
+-			metrics.pixel_height = int(event.window.data2)
+-			pixel_resize_events^ += 1
+-			alicorn.invalidate_root(rt, "SDL drawable size changed")
+-			alicorn.cause_end(rt, host_cause)
+-		case .WINDOW_DISPLAY_SCALE_CHANGED:
+-			host_cause := alicorn.cause_begin(rt, .Host_Event, "display scale changed")
+-			if devtools_last_cause != nil { devtools_last_cause^ = host_cause.cause }
+-			scale_events^ += 1
+-			metrics.pixel_density = sdl3.GetWindowPixelDensity(window)
+-			metrics.display_scale = sdl3.GetWindowDisplayScale(window)
+-			alicorn.invalidate_root(rt, "SDL display scale changed")
+-			alicorn.cause_end(rt, host_cause)
+-		case .TEXT_INPUT:
+-			text_cause := alicorn.cause_begin(rt, .Text_Input, "SDL text input")
+-			if devtools_last_cause != nil { devtools_last_cause^ = text_cause.cause }
+-			text_input_events^ += 1
+-			if manual_log {
+-				raw_text := ""
+-				if event.text.text != nil { raw_text = string(event.text.text) }
+-				fmt.println("sdl_event", "TEXT_INPUT", "text", raw_text)
+-			}
+-			if event.text.text != nil {
+-				owner := native_current_text_input_owner(rt, text_input_state)
+-				if node, ok := rt.nodes[owner]; ok && node.active && node.kind == .Text_Field {
+-					change := alicorn.process_text_input(rt, owner, string(event.text.text))
+-					native_dispatch_text_change(app_text, application, rt, change, telemetry)
+-					if manual_log && application == nil { fmt.println("alicorn_after_TEXT_INPUT", "text", app_text^) }
+-				} else if alicorn.text_input_target_is_active(rt, owner) {
+-					_ = native_dispatch_generic_text_input_event(application, rt, text_input_state,
+-						Application_Text_Input_Event{kind=.Commit, text=string(event.text.text)})
+-				}
+-			}
+-			alicorn.cause_end(rt, text_cause)
+-		case .TEXT_EDITING:
+-			composition_cause := alicorn.cause_begin(rt, .Text_Composition, "SDL text composition")
+-			if devtools_last_cause != nil { devtools_last_cause^ = composition_cause.cause }
+-			composition_events^ += 1
+-			if manual_log {
+-				raw_text := ""
+-				if event.edit.text != nil { raw_text = string(event.edit.text) }
+-				fmt.println("sdl_event", "TEXT_EDITING", "text", raw_text, "start_chars", event.edit.start, "length_chars", event.edit.length)
+-			}
+-			if event.edit.text != nil {
+-				owner := native_current_text_input_owner(rt, text_input_state)
+-				preedit := string(event.edit.text)
+-				if node, ok := rt.nodes[owner]; ok && node.active && node.kind == .Text_Field {
+-					alicorn.process_text_editing(rt, owner, preedit, int(event.edit.start), int(event.edit.length))
+-					if manual_log {
+-						if field, found := rt.nodes[owner]; found {
+-							fmt.println(
+-								"alicorn_after_TEXT_EDITING",
+-								"preedit", field.composition.text,
+-								"selection_bytes", field.composition.selection_start, field.composition.selection_end,
+-							)
+-						}
+-					}
+-				} else if alicorn.text_input_target_is_active(rt, owner) {
+-					if len(preedit) == 0 {
+-						_ = native_dispatch_generic_text_input_event(application, rt, text_input_state,
+-							Application_Text_Input_Event{kind=.Cancel})
+-					} else {
+-						start_byte := alicorn.utf8_character_index_to_byte_offset(preedit, int(event.edit.start))
+-						end_byte := start_byte
+-						if event.edit.start < 0 {
+-							start_byte, end_byte = len(preedit), len(preedit)
+-						} else if event.edit.length >= 0 {
+-							start_char, length_char := int(event.edit.start), int(event.edit.length)
+-							end_byte = alicorn.utf8_character_index_to_byte_offset(preedit, start_char+length_char)
+-						}
+-						_ = native_dispatch_generic_text_input_event(application, rt, text_input_state, Application_Text_Input_Event{
+-							kind=.Preedit, text=preedit,
+-							selection_start_byte=start_byte, selection_end_byte=end_byte,
+-						})
+-					}
+-				}
+-			}
+-			alicorn.cause_end(rt, composition_cause)
+-		}
+-
+-		if event.type == .WINDOW_RESIZED ||
+-			event.type == .WINDOW_PIXEL_SIZE_CHANGED ||
+-			event.type == .WINDOW_METAL_VIEW_RESIZED ||
+-			event.type == .WINDOW_DISPLAY_SCALE_CHANGED {
+-			if !read_window_metrics(window, metrics) {
+-				fail("window metrics became unavailable after a window event")
+-			}
+-		}
+-		if text_input_state != nil {
+-			sync_text_input_focus(window, rt, text_input_state, application)
+-		}
+-		has_event = poll_sdl_event(&event)
+-	}
+-	if telemetry != nil { native_finish_input_pump(telemetry) }
+-}
+-
+-render_native_ui :: proc(rt: ^alicorn.Runtime, frame: u64, value := NATIVE_TEXT_BASE) -> Native_UI_Nodes {
+-	alicorn.invalidate_root(rt, "native frame")
+-	ui, build := alicorn.begin_frame(rt)
+-	if !build { return Native_UI_Nodes{} }
+-	alicorn.container_begin(
+-		&ui,
+-		.Root,
+-		label="native-root",
+-		style=alicorn.Layout_Style{.Column, -1, -1, 0, -1, 0, -1, 0, 12, 8, .Stretch, true},
+-		color=alicorn.Color{0.04, 0.05, 0.08, 1},
+-	)
+-	field := alicorn.text_field(&ui, value, style=alicorn.Layout_Style{.Column, -1, 32, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+-	alicorn.button(&ui, "GPU frame", style=alicorn.Layout_Style{.Column, 180, 32, 0, -1, 0, -1, 0, 0, 0, .Stretch, false})
+-	surface := alicorn.custom_surface(&ui, "animated-surface", frame, alicorn.Rect{0, 0, 280, 120}, 560, 240, 2)
+-	alicorn.container_end(&ui)
+-	alicorn.end_frame(&ui)
+-	return Native_UI_Nodes{field, surface}
+-}
+-
+-
+-make_color_target :: proc(texture: ^sdl3.GPUTexture, color: sdl3.FColor, cycle: bool) -> sdl3.GPUColorTargetInfo {
+-	return sdl3.GPUColorTargetInfo{
+-		texture = texture,
+-		clear_color = color,
+-		load_op = .CLEAR,
+-		store_op = .STORE,
+-		cycle = cycle,
+-	}
+-}
+-
+-draw_display_list :: proc(
+-	command: ^sdl3.GPUCommandBuffer,
+-	swapchain: ^sdl3.GPUTexture,
+-	swap_w, swap_h: sdl3.Uint32,
+-	text_renderer: ^Native_Text_Renderer,
+-	surface_renderer: ^Native_Surface_Renderer,
+-	solid_renderer: ^Native_Solid_Renderer,
+-	display: []alicorn.Display_Command,
+-	logical_to_pixel_x, logical_to_pixel_y: f32,
+-	skip_root := false,
+-	debug_bounds := false,
+-	reserve_solid_vertices := 0,
+-	scratch_allocator := context.temp_allocator,
+-) -> bool {
+-	solid_renderer.runtime = text_renderer.runtime
+-	if !native_text_rebuild_mesh(text_renderer, display, logical_to_pixel_x, logical_to_pixel_y, scratch_allocator) { return false }
+-	if !native_text_sync_atlas(text_renderer, command, scratch_allocator) { return false }
+-	if !native_text_upload_vertices(text_renderer, command) { return false }
+-	if !native_solid_build(solid_renderer, display, logical_to_pixel_x, logical_to_pixel_y, swap_w, swap_h, skip_root) { return false }
+-	debug_draw_start := len(solid_renderer.draws)
+-	if debug_bounds {
+-		native_solid_append_debug_bounds(solid_renderer, display, logical_to_pixel_x, logical_to_pixel_y, swap_w, swap_h, skip_root)
+-	}
+-	// Optional host overlays (currently the DevTools HUD) append to this mesh
+-	// after app draws are recorded. Reserve their bounded space now, before any
+-	// current-command draw can retain the existing GPU buffer.
+-	if reserve_solid_vertices > 0 {
+-		_ = native_solid_ensure_vertex_capacity(solid_renderer, len(solid_renderer.vertices)+reserve_solid_vertices)
+-	}
+-	if len(solid_renderer.vertices) > 0 {
+-		if !native_solid_prepare_white_texture(solid_renderer, command) { return false }
+-		if !native_solid_upload(solid_renderer, command) { return false }
+-	}
+-	// The retained display list remains in logical window units. Only this
+-	// compositor boundary converts its geometry to the physical swapchain.
+-	background := make_color_target(swapchain, sdl3.FColor{0.035, 0.045, 0.065, 1}, false)
+-	pass := sdl3.BeginGPURenderPass(command, &background, 1, nil)
+-	if pass == nil { return false }
+-	sdl3.EndGPURenderPass(pass)
+-
+-	display_index := 0
+-	for display_index < len(display) {
+-		draw := display[display_index]
+-		if native_text_is_text(draw.kind) {
+-			if !native_text_render_command(text_renderer, command, draw, swapchain, swap_w, swap_h, logical_to_pixel_x, logical_to_pixel_y) {
+-				return false
+-			}
+-			display_index += 1
+-			continue
+-		}
+-		if draw.kind == .Custom_Surface {
+-			if !native_surface_render_command(surface_renderer, command, draw, swapchain, swap_w, swap_h, logical_to_pixel_x, logical_to_pixel_y) {
+-				return false
+-			}
+-			display_index += 1
+-			continue
+-		}
+-		batch_start := display_index
+-		for display_index < len(display) {
+-			batch_draw := display[display_index]
+-			if native_text_is_text(batch_draw.kind) || batch_draw.kind == .Custom_Surface { break }
+-			display_index += 1
+-		}
+-		if !native_solid_render_batch(solid_renderer, command, swapchain, swap_w, swap_h, solid_renderer.draws[batch_start:display_index]) {
+-			return false
+-		}
+-	}
+-	if debug_bounds && len(solid_renderer.draws) > debug_draw_start {
+-		if !native_solid_render_batch(solid_renderer, command, swapchain, swap_w, swap_h, solid_renderer.draws[debug_draw_start:]) {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-// Render one retained frame into a software-readable GPU target matching the
+-// text pipeline's swapchain format. This is a deliberately small visual proof:
+-// it verifies that glyph coverage lands in
+-// the expected text bounds and gives us a stable observation point for atlas
+-// cycling and display-list ordering without depending on a screenshot of a
+-// window manager surface.
+-native_text_readback_probe :: proc(
+-	device: ^sdl3.GPUDevice,
+-	text_renderer: ^Native_Text_Renderer,
+-	surface_renderer: ^Native_Surface_Renderer,
+-	solid_renderer: ^Native_Solid_Renderer,
+-	display: []alicorn.Display_Command,
+-	width, height: sdl3.Uint32,
+-	scratch_allocator := context.temp_allocator,
+-) -> (ok: bool, non_background: int) {
+-	if width == 0 || height == 0 { return false, 0 }
+-	if !sdl3.GPUTextureSupportsFormat(device, text_renderer.swapchain_format, .D2, sdl3.GPUTextureUsageFlags{.COLOR_TARGET}) {
+-		return false, 0
+-	}
+-	probe_texture := sdl3.CreateGPUTexture(device, sdl3.GPUTextureCreateInfo{
+-		type=.D2, format=text_renderer.swapchain_format, usage=sdl3.GPUTextureUsageFlags{.COLOR_TARGET},
+-		width=width, height=height, layer_count_or_depth=1, num_levels=1, sample_count=._1,
+-	})
+-	if probe_texture == nil { return false, 0 }
+-	download := sdl3.CreateGPUTransferBuffer(device, sdl3.GPUTransferBufferCreateInfo{
+-		usage=.DOWNLOAD, size=width * height * 4,
+-	})
+-	if download == nil {
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	command := sdl3.AcquireGPUCommandBuffer(device)
+-	if command == nil {
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	if !draw_display_list(command, probe_texture, width, height, text_renderer, surface_renderer, solid_renderer, display, 1, 1, false, scratch_allocator=scratch_allocator) {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	copy_pass := sdl3.BeginGPUCopyPass(command)
+-	if copy_pass == nil {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	source := sdl3.GPUTextureRegion{texture=probe_texture, mip_level=0, layer=0, x=0, y=0, z=0, w=width, h=height, d=1}
+-	destination := sdl3.GPUTextureTransferInfo{transfer_buffer=download, offset=0, pixels_per_row=width, rows_per_layer=height}
+-	sdl3.DownloadFromGPUTexture(copy_pass, source, destination)
+-	sdl3.EndGPUCopyPass(copy_pass)
+-	fence := sdl3.SubmitGPUCommandBufferAndAcquireFence(command)
+-	if fence == nil {
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	fences := [1]^sdl3.GPUFence{fence}
+-	if !sdl3.WaitForGPUFences(device, true, &fences[0], 1) {
+-		sdl3.ReleaseGPUFence(device, fence)
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	mapped := sdl3.MapGPUTransferBuffer(device, download, false)
+-	if mapped == nil {
+-		sdl3.ReleaseGPUFence(device, fence)
+-		sdl3.ReleaseGPUTransferBuffer(device, download)
+-		sdl3.ReleaseGPUTexture(device, probe_texture)
+-		return false, 0
+-	}
+-	text_bounds: alicorn.Rect
+-	text_found := false
+-	for draw in display {
+-		if native_text_is_text(draw.kind) {
+-			text_bounds = draw.bounds
+-			text_found = true
+-			break
+-		}
+-	}
+-	if text_found {
+-		x0, y0, x1, y1 := logical_to_pixel_bounds(text_bounds, 1, 1)
+-		if x0 < 0 { x0 = 0 }
+-		if y0 < 0 { y0 = 0 }
+-		if x1 > int(width) { x1 = int(width) }
+-		if y1 > int(height) { y1 = int(height) }
+-		pixels := cast([^]u8)mapped
+-		for y in y0..<y1 {
+-			for x in x0..<x1 {
+-				index := (y * int(width) + x) * 4
+-				if pixels[index+0] > 50 || pixels[index+1] > 50 || pixels[index+2] > 50 {
+-					non_background += 1
+-				}
+-			}
+-		}
+-	}
+-	sdl3.UnmapGPUTransferBuffer(device, download)
+-	native_text_commit_submission(text_renderer)
+-	native_surface_commit_submission(surface_renderer)
+-	sdl3.ReleaseGPUFence(device, fence)
+-	sdl3.ReleaseGPUTransferBuffer(device, download)
+-	sdl3.ReleaseGPUTexture(device, probe_texture)
+-	ok = text_found && non_background > 0
+-	return
+-}
+-
+-// Write a dependency-free screenshot artifact for diagnostics captures. PPM
+-// is intentionally used instead of pulling an image encoder into the host;
+-// it is trivial for humans, scripts, and agents to inspect or convert.
+-native_capture_display_ppm :: proc(
+-	device: ^sdl3.GPUDevice,
+-	text_renderer: ^Native_Text_Renderer,
+-	surface_renderer: ^Native_Surface_Renderer,
+-	solid_renderer: ^Native_Solid_Renderer,
+-	display: []alicorn.Display_Command,
+-	width, height: sdl3.Uint32,
+-	scale_x, scale_y: f32,
+-	path: string,
+-	debug_bounds := false,
+-	scratch_allocator := context.temp_allocator,
+-) -> bool {
+-	if width == 0 || height == 0 { return false }
+-	if !sdl3.GPUTextureSupportsFormat(device, text_renderer.swapchain_format, .D2, sdl3.GPUTextureUsageFlags{.COLOR_TARGET}) {
+-		return false
+-	}
+-	texture := sdl3.CreateGPUTexture(device, sdl3.GPUTextureCreateInfo{
+-		type=.D2, format=text_renderer.swapchain_format, usage=sdl3.GPUTextureUsageFlags{.COLOR_TARGET},
+-		width=width, height=height, layer_count_or_depth=1, num_levels=1, sample_count=._1,
+-	})
+-	if texture == nil { return false }
+-	defer sdl3.ReleaseGPUTexture(device, texture)
+-	download := sdl3.CreateGPUTransferBuffer(device, sdl3.GPUTransferBufferCreateInfo{usage=.DOWNLOAD, size=width * height * 4})
+-	if download == nil { return false }
+-	defer sdl3.ReleaseGPUTransferBuffer(device, download)
+-	command := sdl3.AcquireGPUCommandBuffer(device)
+-	if command == nil { return false }
+-	if !draw_display_list(command, texture, width, height, text_renderer, surface_renderer, solid_renderer, display, scale_x, scale_y, debug_bounds=debug_bounds, scratch_allocator=scratch_allocator) {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		return false
+-	}
+-	copy_pass := sdl3.BeginGPUCopyPass(command)
+-	if copy_pass == nil {
+-		_ = sdl3.CancelGPUCommandBuffer(command)
+-		return false
+-	}
+-	source := sdl3.GPUTextureRegion{texture=texture, mip_level=0, layer=0, x=0, y=0, z=0, w=width, h=height, d=1}
+-	destination := sdl3.GPUTextureTransferInfo{transfer_buffer=download, offset=0, pixels_per_row=width, rows_per_layer=height}
+-	sdl3.DownloadFromGPUTexture(copy_pass, source, destination)
+-	sdl3.EndGPUCopyPass(copy_pass)
+-	fence := sdl3.SubmitGPUCommandBufferAndAcquireFence(command)
+-	if fence == nil { return false }
+-	defer sdl3.ReleaseGPUFence(device, fence)
+-	fences := [1]^sdl3.GPUFence{fence}
+-	if !sdl3.WaitForGPUFences(device, true, &fences[0], 1) { return false }
+-	mapped := sdl3.MapGPUTransferBuffer(device, download, false)
+-	if mapped == nil { return false }
+-	defer sdl3.UnmapGPUTransferBuffer(device, download)
+-	pixels := cast([^]u8)mapped
+-	builder, builder_err := strings.builder_make_len_cap(0, int(width*height*3)+64)
+-	if builder_err != nil { return false }
+-	defer strings.builder_destroy(&builder)
+-	fmt.sbprintf(&builder, "P6\n%d %d\n255\n", width, height)
+-	for i := u64(0); i < u64(width)*u64(height); i += 1 {
+-		src := i * 4
+-		strings.write_byte(&builder, pixels[src+0])
+-		strings.write_byte(&builder, pixels[src+1])
+-		strings.write_byte(&builder, pixels[src+2])
+-	}
+-	image := strings.to_string(builder)
+-	if err := os.write_entire_file(path, image); err != nil { return false }
+-	native_text_commit_submission(text_renderer)
+-	native_surface_commit_submission(surface_renderer)
+-	native_solid_commit_submission(solid_renderer)
+-	return true
+-}
+-
+-native_ui_fallback_font_path :: proc() -> string {
+-	when ODIN_OS == .Windows {
+-		// Keep the previous broad Windows fallback for Japanese and other glyphs
+-		// outside the bundled Latin-focused default face.
+-		japanese_font := "C:/Windows/Fonts/NotoSansJP-VF.ttf"
+-		if os.exists(japanese_font) { return japanese_font }
+-		return "C:/Windows/Fonts/segoeui.ttf"
+-	} else when ODIN_OS == .Darwin {
+-		return "/System/Library/Fonts/SFNS.ttf"
+-	} else {
+-		return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+-	}
+-}
+-
+-native_monospace_fallback_font_path :: proc() -> string {
+-	when ODIN_OS == .Windows {
+-		return "C:/Windows/Fonts/consola.ttf"
+-	} else when ODIN_OS == .Darwin {
+-		return "/System/Library/Fonts/SFNSMono.ttf"
+-	} else {
+-		return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+-	}
+-}
+-
+-native_load_optional_fallback_font :: proc(rt: ^alicorn.Runtime, role: alicorn.Font_Role, path: string) -> bool {
+-	if !os.exists(path) { return false }
+-	data, err := os.read_entire_file_from_path(path, context.allocator)
+-	if err != nil { return false }
+-	defer delete(data)
+-	return alicorn.text_engine_load_fallback_font_role(&rt.text_engine, role, data)
+-}
+-
+-native_load_default_fonts :: proc(rt: ^alicorn.Runtime) -> bool {
+-	if !alicorn.text_engine_load_font(&rt.text_engine, NATIVE_UI_FONT_DATA) { return false }
+-	if !alicorn.text_engine_load_font_role(&rt.text_engine, .Monospace, NATIVE_MONO_FONT_DATA) { return false }
+-	if !alicorn.text_engine_load_italic_font_role(&rt.text_engine, .UI, NATIVE_UI_ITALIC_FONT_DATA) { return false }
+-	if !alicorn.text_engine_load_italic_font_role(&rt.text_engine, .Monospace, NATIVE_MONO_ITALIC_FONT_DATA) { return false }
+-	// System faces are optional, script-oriented fallbacks; they do not alter
+-	// the bundled primary typography for text the default face can render.
+-	_ = native_load_optional_fallback_font(rt, .UI, native_ui_fallback_font_path())
+-	_ = native_load_optional_fallback_font(rt, .Monospace, native_monospace_fallback_font_path())
+-	return true
+-}
+-
+-configure_platform_activation :: proc() {
+-	when ODIN_OS == .Darwin {
+-		// A bare executable launched from a terminal can create a visible SDL
+-		// window without becoming the active macOS application. That leaves the
+-		// retained UI looking healthy while keyboard and mouse events continue to
+-		// go to the launching application. Make the host's foreground policy
+-		// explicit before SDL initializes its Cocoa application object.
+-		if !sdl3.SetHint(sdl3.HINT_MAC_BACKGROUND_APP, "0") {
+-			fail("SDL_MAC_BACKGROUND_APP hint could not be set")
+-		}
+-		if !sdl3.SetHint(sdl3.HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "1") {
+-			fail("SDL_WINDOW_ACTIVATE_WHEN_SHOWN hint could not be set")
+-		}
+-		if !sdl3.SetHint(sdl3.HINT_WINDOW_ACTIVATE_WHEN_RAISED, "1") {
+-			fail("SDL_WINDOW_ACTIVATE_WHEN_RAISED hint could not be set")
+-		}
+-	}
+-}
+-
+-wait_and_retire_oldest :: proc(
+-	device: ^sdl3.GPUDevice,
+-	in_flight: ^[dynamic; 3]Native_In_Flight,
+-	query_before_wait_true, query_after_wait_true, wait_count: ^int,
+-	timing: ^Native_Host_Timing = nil,
+-) -> bool {
+-	if len(in_flight) == 0 { return true }
+-	old := in_flight[0]
+-	if sdl3.QueryGPUFence(device, old.fence) {
+-		query_before_wait_true^ += 1
+-	}
+-	fences := [1]^sdl3.GPUFence{old.fence}
+-	wait_start := time.now()
+-	if !sdl3.WaitForGPUFences(device, true, &fences[0], 1) {
+-		if timing != nil {
+-			native_timing_accumulate(&timing.fence_wait_ns, &timing.fence_wait_max_ns, u64(time.duration_nanoseconds(time.since(wait_start))) )
+-		}
+-		return false
+-	}
+-	if timing != nil {
+-		native_timing_accumulate(&timing.fence_wait_ns, &timing.fence_wait_max_ns, u64(time.duration_nanoseconds(time.since(wait_start))) )
+-		timing.fence_waits += 1
+-	}
+-	wait_count^ += 1
+-	if sdl3.QueryGPUFence(device, old.fence) {
+-		query_after_wait_true^ += 1
+-	}
+-	// The blocking wait is the authoritative completion point for this known
+-	// oldest submission. Query behavior is recorded but not required for safe
+-	// retirement, including SDL backend implementations with unusual query
+-	// semantics for completed work.
+-	sdl3.ReleaseGPUFence(device, old.fence)
+-	for i := 1; i < len(in_flight); i += 1 {
+-		in_flight[i-1] = in_flight[i]
+-	}
+-	pop(in_flight)
+-	return true
+-}
+-
+-fill_surface_samples :: proc(samples: ^[dynamic]f32, phase: f32) {
+-	for i := 0; i < len(samples^); i += 1 {
+-		x := f32(i) / f32(len(samples^)-1)
+-		samples^[i] = 0.5 + 0.30*math.sin(x*18 + phase) + 0.12*math.sin(x*43 - phase*0.7)
+-	}
+-}
+-
+-// run_application_loop is the reusable native shell. Application state is
+-// borrowed only through callbacks; retained runtime nodes do not store the
+-// pointer. SDL, render-pass scheduling, and GPU resource retirement remain
+-// host responsibilities.
+-run_application_loop :: proc(
+-	window: ^sdl3.Window,
+-	device: ^sdl3.GPUDevice,
+-	rt: ^alicorn.Runtime,
+-	text_renderer: ^Native_Text_Renderer,
+-	surface_renderer: ^Native_Surface_Renderer,
+-	solid_renderer: ^Native_Solid_Renderer,
+-	metrics: ^Window_Metrics,
+-	application: Application,
+-	smoke := false,
+-	manual_log := false,
+-	gpu_driver := "unknown",
+-	idle_proof_seconds := 0,
+-	native_menu: ^Native_Menu_Runtime = nil,
+-) {
+-	application_instance := application
+-	if native_menu != nil {
+-		native_menu.runtime = rt
+-	}
+-	quit_requested := false
+-	logical_resize_events := 0
+-	pixel_resize_events := 0
+-	scale_events := 0
+-	text_input_events := 0
+-	composition_events := 0
+-	text_events := Native_Text_Event_Telemetry{}
+-	devtools_recorder: Native_Flight_Recorder
+-	devtools_hud := Native_DevTools_HUD{}
+-	devtools_hud_redraw_pending := false
+-	devtools_hud_deadline_ns: u64 = 0
+-	in_flight: [dynamic; 3]Native_In_Flight
+-	retired := 0
+-	max_in_flight := 0
+-	query_before_wait_true := 0
+-	query_after_wait_true := 0
+-	wait_count := 0
+-	submitted := 0
+-	timing := Native_Host_Timing{}
+-	diagnostics := native_parse_diagnostics_options()
+-	debug_bounds := diagnostics.debug_bounds
+-	host_scratch := native_host_scratch_make()
+-	defer native_host_scratch_destroy(&host_scratch)
+-	wake_event_id := sdl3.RegisterEvents(1)
+-	if wake_event_id == 0 { fail("SDL_RegisterEvents failed for application wakeups") }
+-	wake_state := Native_Application_Waker{event_type=sdl3.EventType(wake_event_id), active=true}
+-	application_waker := Application_Waker{data=rawptr(&wake_state), wake=native_application_wake}
+-	scheduler_state := Native_Scheduled_Wake_State{active=true}
+-	application_scheduler := Application_Scheduler{
+-		data=rawptr(&scheduler_state),
+-		schedule=native_application_schedule_after,
+-		cancel=native_application_cancel_scheduled,
+-		read_stats=native_application_scheduler_stats,
+-	}
+-	dialog_bridge := native_dialog_bridge_make(window, application_waker)
+-	defer native_dialog_bridge_release(dialog_bridge)
+-	if application_instance.on_services != nil {
+-		application_instance.on_services(application_instance.state, Application_Services{
+-			dialogs=Dialog_Service{handle=rawptr(dialog_bridge)},
+-			clipboard=native_clipboard_service(),
+-			scheduler=application_scheduler,
+-			quit=Application_Quit_Request{data=rawptr(&quit_requested), request=native_application_request_quit},
+-		})
+-	}
+-	if application_instance.on_start != nil {
+-		application_instance.on_start(application_instance.state, application_waker)
+-	}
+-
+-	platform_text := ""
+-	start := time.now()
+-	window_flags := sdl3.GetWindowFlags(window)
+-	text_input_state := Native_Text_Input_State{window_focused=(window_flags & sdl3.WindowFlags{.INPUT_FOCUS}) != sdl3.WindowFlags{}}
+-	pointer_modifier_state := sdl3.GetModState()
+-	alicorn.invalidate_root(rt, "SDL application initial frame")
+-	_ = native_application_build_until_stable(&application_instance, rt, metrics, &timing)
+-	devtools_cursor := native_devtools_cursor_init(rt, &timing, &text_events)
+-	sync_text_input_focus(window, rt, &text_input_state, &application_instance)
+-	live_resize_state := Native_Live_Resize_State{
+-		active=true,
+-		window=window,
+-		device=device,
+-		rt=rt,
+-		application=&application_instance,
+-		metrics=metrics,
+-		text_renderer=text_renderer,
+-		surface_renderer=surface_renderer,
+-		solid_renderer=solid_renderer,
+-		text_input_state=&text_input_state,
+-		timing=&timing,
+-		host_scratch=&host_scratch,
+-		in_flight=&in_flight,
+-		retired=&retired,
+-		max_in_flight=&max_in_flight,
+-		query_before_wait_true=&query_before_wait_true,
+-		query_after_wait_true=&query_after_wait_true,
+-		wait_count=&wait_count,
+-		submitted=&submitted,
+-		text_events=&text_events,
+-		devtools_recorder=&devtools_recorder,
+-		devtools_cursor=&devtools_cursor,
+-		devtools_hud=&devtools_hud,
+-		debug_bounds=debug_bounds,
+-	}
+-	if !sdl3.AddEventWatch(native_live_resize_event_watch, rawptr(&live_resize_state)) {
+-		fail("SDL live-resize event watch registration failed")
+-	}
+-
+-	last_tick := time.now()
+-	last_focus_log := start
+-	wait_for_event := false
+-	drag_autoscroll_deadline_ns: u64 = 0
+-	swapchain_retry_pending := false
+-	last_user_interaction_ns: u64 = 0
+-	devtools_last_cause: alicorn.Cause_Context
+-	event_waits: u64 = 0
+-	wake_events: u64 = 0
+-	for !quit_requested {
+-		native_host_scratch_reset(&host_scratch)
+-		frame_start := time.now()
+-		event_start := time.now()
+-		wait_timed_out := false
+-		idle_proof_timeout := false
+-		smoke_timeout := false
+-		wait_timeout_ms: sdl3.Sint32 = -1
+-		if wait_for_event {
+-			// A successful swapchain acquisition can still return no drawable while
+-			// the window is minimized or the swapchain is temporarily unavailable.
+-			// Keep the presentation revision pending, but sleep between retries and
+-			// let SDL events wake us as soon as the window can be presented again.
+-			if swapchain_retry_pending {
+-				wait_timeout_ms = native_event_wait_timeout_min(wait_timeout_ms, 100)
+-			}
+-			// Tick-driven applications still need their regular callback while a
+-			// drawable is unavailable. Wait only until the next tick rather than
+-			// turning the retry path into either a busy loop or an indefinite wait.
+-			if application_instance.on_tick != nil {
+-				elapsed_ns := time.duration_nanoseconds(time.since(last_tick))
+-				remaining_ns := i64(16_666_667) - elapsed_ns
+-				if remaining_ns < 0 { remaining_ns = 0 }
+-				tick_timeout_ms := sdl3.Sint32((remaining_ns + 999_999) / 1_000_000)
+-				wait_timeout_ms = sdl3.Sint32(native_event_wait_timeout_min(wait_timeout_ms, tick_timeout_ms))
+-			}
+-			current_ns := u64(sdl3.GetTicksNS())
+-			if drag_autoscroll_deadline_ns != 0 {
+-				drag_timeout_ms := sdl3.Sint32(scheduled_wake_timeout_ms(drag_autoscroll_deadline_ns, current_ns))
+-				wait_timeout_ms = sdl3.Sint32(native_event_wait_timeout_min(wait_timeout_ms, drag_timeout_ms))
+-			}
+-			if next_deadline, found := scheduled_wake_next_deadline(&scheduler_state); found {
+-				scheduled_timeout_ms := sdl3.Sint32(scheduled_wake_timeout_ms(next_deadline, current_ns))
+-				wait_timeout_ms = sdl3.Sint32(native_event_wait_timeout_min(wait_timeout_ms, scheduled_timeout_ms))
+-			}
+-			if devtools_hud.visible && devtools_hud_deadline_ns != 0 {
+-				hud_timeout_ms := sdl3.Sint32(scheduled_wake_timeout_ms(devtools_hud_deadline_ns, current_ns))
+-				wait_timeout_ms = sdl3.Sint32(native_event_wait_timeout_min(wait_timeout_ms, hud_timeout_ms))
+-			}
+-			if smoke {
+-				elapsed := time.duration_nanoseconds(time.since(start))
+-				remaining := i64(3_000_000_000) - elapsed
+-				if remaining <= 0 {
+-					quit_requested = true
+-					continue
+-				}
+-				smoke_timeout_ms := u64((remaining + 999_999) / 1_000_000)
+-				if wait_timeout_ms < 0 || smoke_timeout_ms < u64(wait_timeout_ms) {
+-					wait_timeout_ms = sdl3.Sint32(min(smoke_timeout_ms, u64(0x7fff_ffff)))
+-					smoke_timeout = true
+-				}
+-			}
+-			if idle_proof_seconds > 0 {
+-				elapsed := time.duration_nanoseconds(time.since(start))
+-				remaining := i64(idle_proof_seconds)*1_000_000_000 - elapsed
+-				if remaining <= 0 {
+-					quit_requested = true
+-					continue
+-				}
+-				idle_timeout_ms := u64((remaining + 999_999) / 1_000_000)
+-				if wait_timeout_ms < 0 || idle_timeout_ms < u64(wait_timeout_ms) {
+-					wait_timeout_ms = sdl3.Sint32(min(idle_timeout_ms, u64(0x7fff_ffff)))
+-					idle_proof_timeout = true
+-					smoke_timeout = false
+-				}
+-			}
+-			swapchain_retry_pending = false
+-		}
+-		pump_events(
+-			window, rt, metrics, &quit_requested,
+-			&logical_resize_events, &pixel_resize_events, &scale_events,
+-			&text_input_events, &composition_events, &platform_text,
+-			manual_log=manual_log,
+-			application=&application_instance,
+-			diagnostics_capture_requested=&diagnostics.capture_requested,
+-			debug_bounds=&debug_bounds,
+-			telemetry=&text_events,
+-			wake_event=sdl3.EventType(wake_event_id),
+-			wake_event_enabled=true,
+-			wait_for_event=wait_for_event,
+-			event_waits=&event_waits,
+-			wake_events=&wake_events,
+-			wait_timeout_ms=wait_timeout_ms,
+-			wait_timed_out=&wait_timed_out,
+-			native_menu=native_menu,
+-			last_user_interaction_ns=&last_user_interaction_ns,
+-			text_input_state=&text_input_state,
+-			pointer_modifier_state=&pointer_modifier_state,
+-			devtools_hud=&devtools_hud,
+-			devtools_hud_redraw_pending=&devtools_hud_redraw_pending,
+-			devtools_last_cause=&devtools_last_cause,
+-		)
+-		native_drag_autoscroll_update(rt, &drag_autoscroll_deadline_ns, u64(sdl3.GetTicksNS()))
+-		if native_menu != nil {
+-			if command, ok := native_menu_take_pending(native_menu); ok {
+-				native_menu_dispatch_command(native_menu, command)
+-			}
+-		}
+-		native_dialog_dispatch(dialog_bridge, &application_instance, rt)
+-		wait_for_event = false
+-		if !quit_requested {
+-			native_dispatch_scheduled_wakes(&application_instance, rt, &scheduler_state, last_user_interaction_ns, &timing)
+-		}
+-		if wait_timed_out && (idle_proof_timeout || smoke_timeout) {
+-			quit_requested = true
+-			continue
+-		}
+-		native_timing_accumulate(&timing.event_pump_ns, &timing.event_pump_max_ns, u64(time.duration_nanoseconds(time.since(event_start))) )
+-		if quit_requested { break }
+-
+-		now := time.now()
+-		when ODIN_OS == .Darwin {
+-			if manual_log && time.duration_nanoseconds(time.since(last_focus_log)) >= 1_000_000_000 {
+-				focus := darwin_focus_state(window)
+-				fmt.println(
+-					"darwin_focus",
+-					"app_active", focus.app_active,
+-					"key_window", focus.key_window,
+-					"sdl_input_focus", focus.input_focus,
+-				)
+-				last_focus_log = now
+-			}
+-		}
+-		if smoke && time.duration_nanoseconds(time.since(start)) >= 3_000_000_000 {
+-			quit_requested = true
+-			continue
+-		}
+-		if application_instance.on_tick != nil && time.duration_nanoseconds(time.since(last_tick)) >= 16_666_667 {
+-			tick_start := time.now()
+-			timing.application_tick_calls += 1
+-			tick_cause := alicorn.cause_begin(rt, .Application, "application tick")
+-			devtools_last_cause = tick_cause.cause
+-			application_instance.on_tick(application_instance.state, rt)
+-			alicorn.cause_end(rt, tick_cause)
+-			native_timing_accumulate(&timing.application_tick_ns, &timing.application_tick_max_ns, u64(time.duration_nanoseconds(time.since(tick_start))) )
+-			last_tick = now
+-		}
+-
+-		if rt.invalidated {
+-			_ = native_application_build_until_stable(&application_instance, rt, metrics, &timing)
+-		}
+-		if alicorn.drag_is_active(rt) && !rt.invalidated {
+-			alicorn.drag_refresh_target(rt)
+-			_ = native_dispatch_drag_event(&application_instance, rt)
+-			if rt.invalidated {
+-				_ = native_application_build_until_stable(&application_instance, rt, metrics, &timing)
+-			}
+-		}
+-		// A focus or caret change can update the platform candidate anchor
+-		// without requiring a procedural description rebuild.
+-		sync_text_input_focus(window, rt, &text_input_state, &application_instance)
+-
+-		// Interaction-only invalidation updates retained paint without asking the
+-		// application to rebuild its procedural description. Flush that retained
+-		// presentation before submitting the next GPU frame.
+-		if !rt.invalidated && alicorn.presentation_needs_frame(rt) {
+-			presentation_ui, ready := alicorn.begin_presentation_frame(rt)
+-			if ready {
+-				alicorn.end_presentation_frame(&presentation_ui)
+-			}
+-		}
+-
+-		application_submission_pending := alicorn.frame_needs_submission(rt)
+-		devtools_cause := devtools_last_cause
+-		if devtools_cause.kind == .None { devtools_cause = rt.frame_cause }
+-		if rt.pending_work_seen { devtools_cause = rt.pending_work_cause if !rt.pending_work_mixed else alicorn.Cause_Context{} }
+-		if rt.submission_cause_seen {
+-			devtools_cause = rt.submission_cause if !rt.submission_cause_mixed else alicorn.Cause_Context{}
+-		}
+-		if devtools_cause.kind == .None { devtools_cause = alicorn.Cause_Context{kind=.Host_Event} }
+-		devtools_sample_time_ns := u64(sdl3.GetTicksNS())
+-		devtools_preview := native_devtools_make_sample(
+-			&devtools_cursor, rt, &timing, &text_events, devtools_cause, devtools_sample_time_ns, host_wakes=0,
+-		)
+-		if application_submission_pending { devtools_preview.gpu_submissions += 1 }
+-		if text_events.pending_input_timestamp > 0 && devtools_sample_time_ns >= text_events.pending_input_timestamp {
+-			// While a presentation is still being encoded, the HUD's IN~ value is
+-			// the elapsed lower bound. The finalized recorder sample below replaces
+-			// it with the exact input-to-submit duration.
+-			devtools_preview.input_to_submit_ns = devtools_sample_time_ns-text_events.pending_input_timestamp
+-		}
+-		devtools_hud_deadline_wake := wait_timed_out && devtools_hud.visible && devtools_hud_deadline_ns != 0 &&
+-			devtools_sample_time_ns >= devtools_hud_deadline_ns
+-		devtools_wake_observed := native_devtools_observed_wake(&devtools_cursor, devtools_preview, &timing, &text_events)
+-		if devtools_wake_observed && !devtools_hud_deadline_wake { devtools_preview.host_wakes = 1 }
+-		if devtools_hud.visible && (devtools_wake_observed || devtools_hud_deadline_wake) {
+-			devtools_hud_redraw_pending = true
+-		}
+-		if application_submission_pending || devtools_hud_redraw_pending {
+-			if len(in_flight) >= 2 {
+-				if !wait_and_retire_oldest(device, &in_flight, &query_before_wait_true, &query_after_wait_true, &wait_count, &timing) {
+-					fail("SDL application fence retirement failed")
+-				}
+-				retired += 1
+-			}
+-			encode_start := time.now()
+-			command := sdl3.AcquireGPUCommandBuffer(device)
+-			if command == nil { fail("SDL application command acquisition failed") }
+-			swapchain: ^sdl3.GPUTexture
+-			swap_w, swap_h: sdl3.Uint32
+-			if !sdl3.AcquireGPUSwapchainTexture(command, window, &swapchain, &swap_w, &swap_h) {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("SDL application swapchain acquisition failed")
+-			}
+-			if swapchain == nil || swap_w == 0 || swap_h == 0 {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				swapchain_retry_pending = true
+-				wait_for_event = true
+-				native_devtools_record_wake(&devtools_recorder, &devtools_cursor, rt, &timing, &text_events,
+-					devtools_cause, devtools_sample_time_ns, devtools_preview.host_wakes)
+-				devtools_last_cause = {}
+-				if devtools_hud.visible {
+-					devtools_hud_deadline_ns = native_devtools_hud_next_wake_ns(&devtools_recorder, u64(sdl3.GetTicksNS()))
+-				}
+-				continue
+-			}
+-			metrics.pixel_width = int(swap_w)
+-			metrics.pixel_height = int(swap_h)
+-			logical_to_pixel_x := f32(swap_w) / f32(metrics.logical_width)
+-			logical_to_pixel_y := f32(swap_h) / f32(metrics.logical_height)
+-			renderer_metrics_before := native_devtools_renderer_metrics_capture(text_renderer, surface_renderer, solid_renderer)
+-			hud_vertex_reserve := 0
+-			if devtools_hud.visible { hud_vertex_reserve = NATIVE_DEVTOOLS_HUD_RESERVE_VERTICES }
+-			if !draw_display_list(
+-				command, swapchain, swap_w, swap_h,
+-				text_renderer, surface_renderer, solid_renderer, rt.display[:],
+-				logical_to_pixel_x, logical_to_pixel_y,
+-				debug_bounds=debug_bounds,
+-				reserve_solid_vertices=hud_vertex_reserve,
+-				scratch_allocator=host_scratch.allocator,
+-			) {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("SDL application display-list draw failed")
+-			}
+-			application_encode_elapsed := u64(time.duration_nanoseconds(time.since(encode_start)))
+-			if application_submission_pending {
+-				timing.application_gpu_encode_ns += application_encode_elapsed
+-			} else {
+-				// A HUD-only wake must redraw the swapchain's base scene too, but
+-				// those host-forced draw costs are attributed to DevTools rather
+-				// than to the application interaction sample.
+-				timing.devtools_hud_encode_ns += application_encode_elapsed
+-			}
+-			hud_encode_start := time.now()
+-			if !native_devtools_hud_render(
+-				&devtools_hud, solid_renderer, command, swapchain, swap_w, swap_h,
+-				f32(swap_w)/f32(metrics.logical_width), f32(swap_h)/f32(metrics.logical_height),
+-				&devtools_recorder, u64(sdl3.GetTicksNS()), devtools_preview,
+-				preview_valid=devtools_hud.visible,
+-				last_invalidation=rt.last_invalidation_reason,
+-			) {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("Alicorn DevTools HUD draw failed")
+-			}
+-			if !application_submission_pending {
+-				native_devtools_renderer_metrics_restore(text_renderer, surface_renderer, solid_renderer, renderer_metrics_before)
+-			}
+-			hud_encode_elapsed := u64(time.duration_nanoseconds(time.since(hud_encode_start)))
+-			if devtools_hud.visible { timing.devtools_hud_encode_ns += hud_encode_elapsed }
+-			total_encode_elapsed := u64(time.duration_nanoseconds(time.since(encode_start)))
+-			native_timing_accumulate(&timing.gpu_encode_ns, &timing.gpu_encode_max_ns, total_encode_elapsed)
+-			submit_start := time.now()
+-			fence := sdl3.SubmitGPUCommandBufferAndAcquireFence(command)
+-			native_timing_accumulate(&timing.gpu_submit_ns, &timing.gpu_submit_max_ns, u64(time.duration_nanoseconds(time.since(submit_start))) )
+-			if fence == nil {
+-				fail("SDL application submission failed")
+-			}
+-			append(&in_flight, Native_In_Flight{fence})
+-			native_text_commit_submission(text_renderer)
+-			native_surface_commit_submission(surface_renderer)
+-			if application_submission_pending {
+-				alicorn.gpu_surface_frame_consumed(rt)
+-				// A retained frame remains pending until this successful submit
+-				// acknowledgement. A HUD-only redraw has no app revision to acknowledge.
+-				alicorn.frame_submission_succeeded(rt)
+-			}
+-			submitted += 1
+-			timing.gpu_submissions += 1
+-			if application_submission_pending {
+-				rt.stats.gpu_submits += 1
+-				native_note_input_submission(&text_events)
+-			}
+-			devtools_hud_redraw_pending = false
+-			if len(in_flight) > max_in_flight { max_in_flight = len(in_flight) }
+-		}
+-		if !rt.invalidated && !alicorn.frame_needs_submission(rt) {
+-			if application_instance.on_tick == nil {
+-				// Event-driven apps wait for either input, a worker wake, or their
+-				// nearest scheduled deadline; there is no display-cadence tick.
+-				// A bounded smoke run adds its own final event-loop deadline.
+-				wait_for_event = true
+-			} else {
+-				sdl3.Delay(1)
+-			}
+-		}
+-		native_timing_add_frame(&timing, u64(time.duration_nanoseconds(time.since(frame_start))))
+-		scheduler_stats := scheduled_wake_read_stats(&scheduler_state)
+-		timing.frequent_wakes = scheduler_stats.frequent_wakes
+-		timing.opportunistic_wakes = scheduler_stats.opportunistic_wakes
+-		timing.scheduled_requests = scheduler_stats.scheduled
+-		timing.schedule_coalesces = scheduler_stats.coalesced
+-		timing.opportunistic_deferrals = scheduler_stats.opportunistic_deferrals
+-		timing.maximum_scheduled_lateness_ns = scheduler_stats.maximum_lateness_ns
+-		native_devtools_record_wake(&devtools_recorder, &devtools_cursor, rt, &timing, &text_events,
+-			devtools_cause, devtools_sample_time_ns, devtools_preview.host_wakes)
+-		devtools_last_cause = {}
+-		devtools_hud_deadline_ns = 0
+-		if devtools_hud.visible {
+-			devtools_hud_deadline_ns = native_devtools_hud_next_wake_ns(&devtools_recorder, u64(sdl3.GetTicksNS()))
+-		}
+-		if native_write_diagnostics(&diagnostics, start, gpu_driver, metrics^, rt, text_renderer, surface_renderer, solid_renderer, &timing, &text_events, &devtools_recorder) {
+-			screenshot_path := fmt.tprintf("%s/screenshot.ppm", diagnostics.last_capture_dir)
+-			if native_capture_display_ppm(
+-				device, text_renderer, surface_renderer, solid_renderer, rt.display[:],
+-				sdl3.Uint32(metrics.pixel_width), sdl3.Uint32(metrics.pixel_height),
+-				f32(metrics.pixel_width) / f32(metrics.logical_width),
+-				f32(metrics.pixel_height) / f32(metrics.logical_height),
+-				screenshot_path,
+-				debug_bounds=debug_bounds,
+-			) {
+-				fmt.println("alicorn_diagnostics", "screenshot", screenshot_path)
+-			} else {
+-				fmt.println("alicorn_diagnostics", "screenshot_failed", screenshot_path)
+-			}
+-		}
+-	}
+-
+-	live_resize_state.active = false
+-	sdl3.RemoveEventWatch(native_live_resize_event_watch, rawptr(&live_resize_state))
+-	if !sdl3.WaitForGPUIdle(device) { fail("SDL application GPU idle wait failed") }
+-	native_dialog_bridge_shutdown(dialog_bridge)
+-	native_cancel_current_text_composition(&application_instance, rt, &text_input_state, "application shutdown")
+-	if text_input_state.active {
+-		_ = sdl3.ClearComposition(window)
+-		_ = sdl3.StopTextInput(window)
+-		text_input_state.active = false
+-		text_input_state.owner = 0
+-	}
+-	if application_instance.on_stop != nil {
+-		// Stop worker threads while the host-owned waker state is still alive.
+-		// This prevents a late worker completion from calling through a stack
+-		// address after run_application_loop returns.
+-		application_instance.on_stop(application_instance.state)
+-	}
+-	scheduler_state.active = false
+-	for &pending in scheduler_state.pending { pending = false }
+-	wake_state.active = false
+-	for entry in in_flight {
+-		sdl3.ReleaseGPUFence(device, entry.fence)
+-		retired += 1
+-	}
+-	clear(&in_flight)
+-	elapsed_ns := time.duration_nanoseconds(time.since(start))
+-	fmt.println(
+-		"SDL application PASS",
+-		"submissions", submitted,
+-		"retired", retired,
+-		"max_frames_in_flight", max_in_flight,
+-		"wall_ns", elapsed_ns,
+-		"logical_resize_events", logical_resize_events,
+-		"pixel_resize_events", pixel_resize_events,
+-		"scale_events", scale_events,
+-		"text_input_events", text_input_events,
+-		"composition_events", composition_events,
+-		"text_change_dispatches", text_events.text_change_dispatches,
+-		"text_changes", text_events.text_changes,
+-		"text_edit_key_events", text_events.text_edit_key_events,
+-		"text_navigation_key_events", text_events.text_navigation_key_events,
+-		"text_selection_key_events", text_events.text_selection_key_events,
+-		"text_word_key_events", text_events.text_word_key_events,
+-		"events_per_pump_max", text_events.events_per_pump_max,
+-		"oldest_event_age_max_ns", text_events.oldest_event_age_max_ns,
+-		"input_to_submit_p95_ns", native_timing_percentile(text_events.input_to_submit_samples[:], 0.95),
+-		"input_to_submit_max_ns", text_events.input_to_submit_max_ns,
+-		"text_mesh_rebuilds", text_renderer.mesh_rebuilds,
+-		"text_mesh_cache_hits", text_renderer.mesh_cache_hits,
+-		"text_fingerprint_ns", text_renderer.fingerprint_ns,
+-		"text_fingerprint_bytes", text_renderer.fingerprint_bytes,
+-		"text_mesh_rebuild_ns", text_renderer.mesh_rebuild_ns,
+-		"text_vertex_uploads", text_renderer.vertex_uploads,
+-		"frame_p95_ns", native_timing_percentile(timing.frame_samples[:], 0.95),
+-		"gpu_encode_ns", timing.gpu_encode_ns,
+-		"gpu_submit_ns", timing.gpu_submit_ns,
+-		"fence_wait_ns", timing.fence_wait_ns,
+-		"application_tick_max_ns", timing.application_tick_max_ns,
+-		"application_build_max_ns", timing.application_build_max_ns,
+-		"application_stabilization_rebuilds", timing.application_stabilization_rebuilds,
+-		"application_stabilization_limit_hits", timing.application_stabilization_limit_hits,
+-		"event_waits", event_waits,
+-		"application_wake_events", wake_events,
+-		"gpu_encode_max_ns", timing.gpu_encode_max_ns,
+-		"fence_wait_max_ns", timing.fence_wait_max_ns,
+-	)
+-}
+-
+-// Run owns the complete SDL3/SDL_GPU application shell for external dogfood
+-// programs. The app supplies only its state pointer and ordinary callbacks.
++// Run owns the complete SDL3/SDL_GPU application shell.
++// Applications supply their state and callbacks.
+ Run :: proc(application: Application, smoke := false) {
+ 	input_debug := false
+-	idle_proof_seconds := 0
++	validation_timeout_seconds := 0
+ 	for argument in os.args {
+ 		if argument == "--input-debug" { input_debug = true }
+-		prefix := "--idle-proof-seconds="
++		prefix := "--idle-validation-seconds="
++		legacy_prefix := "--idle-proof-seconds="
++		if strings.has_prefix(argument, legacy_prefix) { prefix = legacy_prefix }
+ 		if strings.has_prefix(argument, prefix) {
+ 			parsed, ok := strconv.parse_int(argument[len(prefix):])
+-			if ok && parsed > 0 { idle_proof_seconds = int(parsed) }
++			if ok && parsed > 0 { validation_timeout_seconds = int(parsed) }
+ 		}
+ 	}
+ 	if !sdl3.SetHint(sdl3.HINT_IME_IMPLEMENTED_UI, "composition") {
+@@ -2723,504 +101,5 @@ Run :: proc(application: Application, smoke := false) {
+ 	// terminal on macOS. Raise again only after the application is ready so a
+ 	// visible-but-inert window is not handed to the user.
+ 	if !sdl3.RaiseWindow(window) { fail("SDL_RaiseWindow failed after host initialization") }
+-	run_application_loop(window, device, &rt, &text_renderer, &surface_renderer, &solid_renderer, &metrics, application, smoke, input_debug, string(selected_driver), idle_proof_seconds=idle_proof_seconds, native_menu=&native_menu)
+-}
+-
+-RunFoundation :: proc() {
+-	// SDL video, window, text-input, event polling, and GPU operations all run
+-	// on this main thread. No background event loop is introduced by the adapter.
+-	manual_ime := false
+-	surface_stress := false
+-	surface_geometry_test := false
+-	text_input_contract_test := false
+-	for argument in os.args {
+-		if argument == "--manual-ime" {
+-			manual_ime = true
+-		}
+-		if argument == "--surface-stress" {
+-			surface_stress = true
+-		}
+-		if argument == "--surface-geometry-test" {
+-			surface_geometry_test = true
+-		}
+-		if argument == "--text-input-contract-test" {
+-			text_input_contract_test = true
+-		}
+-	}
+-	if text_input_contract_test {
+-		if !native_text_paint_span_contract_test() { fail("native text paint-span contract tests failed") }
+-		if !native_generic_text_input_contract_test() { fail("generic text-input host contract tests failed") }
+-		if !native_generic_text_navigation_contract_test() { fail("generic text-navigation host contract tests failed") }
+-		fmt.println("Alicorn generic text-input/navigation/paint-span host contract: PASS")
+-		return
+-	}
+-	if surface_geometry_test {
+-		if !native_surface_geometry_self_test() { fail("native GPU surface geometry tests failed") }
+-		fmt.println("Alicorn SDL_GPU surface geometry tests: PASS")
+-		return
+-	}
+-	// Alicorn renders the inline preedit and underline; the operating system
+-	// continues to own candidate-list presentation.
+-	if !sdl3.SetHint(sdl3.HINT_IME_IMPLEMENTED_UI, "composition") {
+-		fail("SDL_IME_IMPLEMENTED_UI hint could not be set")
+-	}
+-	configure_platform_activation()
+-	if !sdl3.Init(sdl3.INIT_VIDEO) {
+-		fail("SDL_Init failed")
+-	}
+-	defer sdl3.Quit()
+-
+-	window := sdl3.CreateWindow(
+-		"Alicorn SDL_GPU proof",
+-		640,
+-		480,
+-		sdl3.WindowFlags{.RESIZABLE, .HIGH_PIXEL_DENSITY},
+-	)
+-	if window == nil {
+-		fail("SDL_CreateWindow failed")
+-	}
+-	defer sdl3.DestroyWindow(window)
+-	if !sdl3.RaiseWindow(window) {
+-		fail("SDL_RaiseWindow failed")
+-	}
+-
+-	metrics: Window_Metrics
+-	if !read_window_metrics(window, &metrics) {
+-		fail("initial window metrics are unavailable")
+-	}
+-	print_window_metrics("initial", metrics)
+-	when ODIN_OS == .Darwin {
+-		if metrics.pixel_density > 1 &&
+-			(metrics.pixel_width == metrics.logical_width || metrics.pixel_height == metrics.logical_height) {
+-			fail("high-density macOS window did not expose distinct logical and pixel dimensions")
+-		}
+-	}
+-	validate_pointer_coordinates()
+-	validate_pixel_transform()
+-	validate_text_pixel_snapping()
+-
+-	formats := sdl3.GPUShaderFormat{.SPIRV, .DXIL, .MSL}
+-	gpu_driver_name: cstring = nil
+-	when ODIN_OS == .Darwin {
+-		// Driver policy belongs to this platform adapter, not the retained
+-		// runtime. Other SDL platforms continue to use their default driver.
+-		gpu_driver_name = "metal"
+-	}
+-	device := sdl3.CreateGPUDevice(formats, false, gpu_driver_name)
+-	if device == nil {
+-		fail("SDL_CreateGPUDevice failed")
+-	}
+-	defer sdl3.DestroyGPUDevice(device)
+-
+-	selected_driver := sdl3.GetGPUDeviceDriver(device)
+-	fmt.println("gpu_driver_requested", gpu_driver_name, "gpu_driver_selected", selected_driver)
+-	when ODIN_OS == .Darwin {
+-		if selected_driver == nil || string(selected_driver) != "metal" {
+-			fail("macOS SDL_GPU did not select the requested Metal driver")
+-		}
+-	}
+-
+-	if !sdl3.ClaimWindowForGPUDevice(device, window) {
+-		fail("SDL_ClaimWindowForGPUDevice failed")
+-	}
+-	defer sdl3.ReleaseWindowFromGPUDevice(device, window)
+-	if !sdl3.SetGPUAllowedFramesInFlight(device, 3) {
+-		fail("SDL_SetGPUAllowedFramesInFlight failed")
+-	}
+-	rt := alicorn.new_runtime(alicorn.Rect{0, 0, f32(metrics.logical_width), f32(metrics.logical_height)})
+-	host_scratch := native_host_scratch_make()
+-	defer native_host_scratch_destroy(&host_scratch)
+-
+-	if !native_load_default_fonts(&rt) {
+-		fail("GPU bundled Runa fonts could not be initialized")
+-	}
+-	text_renderer, text_ok := native_text_make(device, sdl3.GetGPUSwapchainTextureFormat(device, window), &rt)
+-	if !text_ok {
+-		fail("GPU text pipeline or atlas initialization failed")
+-	}
+-	defer native_text_destroy(&text_renderer)
+-	surface_renderer, surface_ok := native_surface_make(device, sdl3.GetGPUSwapchainTextureFormat(device, window), &rt)
+-	if !surface_ok {
+-		fail("GPU surface pipeline initialization failed")
+-	}
+-	defer native_surface_destroy(&surface_renderer)
+-	solid_renderer, solid_ok := native_solid_make(device, sdl3.GetGPUSwapchainTextureFormat(device, window))
+-	if !solid_ok { fail("GPU solid rectangle pipeline initialization failed") }
+-	defer native_solid_destroy(&solid_renderer)
+-	// Establish a deterministic visual proof before the resize stress. The
+-	// runtime display is rendered into an offscreen RGBA8 target, downloaded
+-	// only after its submission fence signals, and checked inside the text
+-	// bounds.
+-	nodes := render_native_ui(&rt, 0)
+-	field := nodes.field
+-	alicorn.focus(&rt, field)
+-	render_native_ui(&rt, 0)
+-	readback_ok, readback_non_background := native_text_readback_probe(
+-		device,
+-		&text_renderer,
+-		&surface_renderer,
+-		&solid_renderer,
+-		rt.display[:],
+-		sdl3.Uint32(metrics.logical_width),
+-		sdl3.Uint32(metrics.logical_height),
+-		scratch_allocator=host_scratch.allocator,
+-	)
+-	if !readback_ok {
+-		fmt.println("GPU text readback probe failed", "non_background", readback_non_background, "display_commands", len(rt.display))
+-		fail("GPU text offscreen readback found no glyph coverage")
+-	}
+-
+-	in_flight: [dynamic; 3]Native_In_Flight
+-	quit_requested := false
+-	logical_resize_events := 0
+-	pixel_resize_events := 0
+-	scale_events := 0
+-	text_input_events := 0
+-	composition_events := 0
+-	app_text, app_text_err := strings.clone(NATIVE_TEXT_BASE)
+-	if app_text_err != nil { fail("native text state allocation failed") }
+-	defer { if len(app_text) > 0 { delete(app_text) } }
+-	window_flags := sdl3.GetWindowFlags(window)
+-	text_input_state := Native_Text_Input_State{window_focused=(window_flags & sdl3.WindowFlags{.INPUT_FOCUS}) != sdl3.WindowFlags{}}
+-	sync_text_input_focus(window, &rt, &text_input_state)
+-	if !text_input_state.active {
+-		fmt.println("Waiting up to 5 seconds for window focus before text-input validation; click the Alicorn SDL_GPU proof window if needed")
+-	}
+-	focus_wait_start := time.now()
+-	for !text_input_state.active && !quit_requested &&
+-		time.duration_nanoseconds(time.since(focus_wait_start)) < 5_000_000_000 {
+-		pump_events(
+-			window, &rt, &metrics, &quit_requested,
+-			&logical_resize_events, &pixel_resize_events, &scale_events,
+-			&text_input_events, &composition_events, &app_text,
+-			text_input_state=&text_input_state,
+-		)
+-		window_flags = sdl3.GetWindowFlags(window)
+-		has_input_focus := (window_flags & sdl3.WindowFlags{.INPUT_FOCUS}) != sdl3.WindowFlags{}
+-		if has_input_focus {
+-			text_input_state.window_focused = true
+-			sync_text_input_focus(window, &rt, &text_input_state)
+-		}
+-		if !text_input_state.active { sdl3.Delay(16) }
+-	}
+-	if !text_input_state.active || !sdl3.TextInputActive(window) {
+-		when ODIN_OS == .Darwin {
+-			focus := darwin_focus_state(window)
+-			fmt.println(
+-				"native_text_input_focus",
+-				"app_active", focus.app_active,
+-				"key_window", focus.key_window,
+-				"sdl_input_focus", focus.input_focus,
+-				"runtime_focus", rt.focused,
+-				"field", field,
+-			)
+-		}
+-		fail("focused text field did not activate SDL text input after waiting for window focus")
+-	}
+-	// Feed one deterministic pair through SDL's own event queue. This is not
+-	// a substitute for manual OS-IME validation, but it proves the native
+-	// adapter consumes the real SDL_TEXT_EDITING/TEXT_INPUT union fields,
+-	// copies their strings into runtime-owned state, and commits only on the
+-	// committed event.
+-	preedit_event := sdl3.Event{type=.TEXT_EDITING}
+-	preedit_event.edit.text = "かな"
+-	preedit_event.edit.start = 1
+-	preedit_event.edit.length = 1
+-	if !sdl3.PushEvent(&preedit_event) { fail("SDL_PushEvent failed for text-editing probe") }
+-	pump_events(
+-		window, &rt, &metrics, &quit_requested,
+-		&logical_resize_events, &pixel_resize_events, &scale_events,
+-		&text_input_events, &composition_events, &app_text,
+-		text_input_state=&text_input_state,
+-	)
+-	if rt.nodes[field].text != NATIVE_TEXT_BASE || !rt.nodes[field].composition.active {
+-		fail("SDL text-editing probe mutated committed text or failed to retain preedit")
+-	}
+-	render_native_ui(&rt, 0, app_text)
+-	composition_command_found := false
+-	for command in rt.display {
+-		if command.kind == .Text_Composition { composition_command_found = true; break }
+-	}
+-	if !composition_command_found { fail("SDL text-editing probe did not produce a composition display command") }
+-	commit_event := sdl3.Event{type=.TEXT_INPUT}
+-	commit_event.text.text = "世界"
+-	if !sdl3.PushEvent(&commit_event) { fail("SDL_PushEvent failed for text-input probe") }
+-	pump_events(
+-		window, &rt, &metrics, &quit_requested,
+-		&logical_resize_events, &pixel_resize_events, &scale_events,
+-		&text_input_events, &composition_events, &app_text,
+-		text_input_state=&text_input_state,
+-	)
+-	expected_probe_text := fmt.tprintf("%s%s", NATIVE_TEXT_BASE, "世界")
+-	if app_text != expected_probe_text || rt.nodes[field].composition.active {
+-		fail("SDL text-input probe failed to commit and clear preedit")
+-	}
+-	if manual_ime {
+-		fmt.println("manual_ime_mode", "focus the text field, activate Microsoft Japanese IME or Microsoft Pinyin, type a composition, and close the window when finished")
+-	}
+-	submitted := 0
+-	retired := 0
+-	max_in_flight := 0
+-	query_before_wait_true := 0
+-	query_after_wait_true := 0
+-	wait_count := 0
+-
+-	resize_widths := [3]c.int{801, 1024, 640}
+-	resize_heights := [3]c.int{601, 768, 480}
+-	frame_limit: int = RESIZE_STRESS_ITERATIONS
+-	if manual_ime {
+-		// Five minutes at the manual fixture's 60 Hz pacing is enough for a
+-		// real-OS IME check while keeping accidental unattended runs bounded.
+-		frame_limit = 18_000
+-	}
+-	if surface_stress {
+-		// 120 Hz for ten seconds. The surface revision path is exercised while
+-		// the ordinary procedural description is intentionally left asleep.
+-		frame_limit = 1_200
+-	}
+-	surface_samples := make([dynamic]f32, 0, 512)
+-	defer delete(surface_samples)
+-	for i := 0; i < 512; i += 1 { append(&surface_samples, 0) }
+-	if surface_stress && rt.invalidated {
+-		// Settle the deterministic input probe before measuring surface-only
+-		// frames. The following counter window starts after this one ordinary
+-		// application description has been adopted.
+-		nodes = render_native_ui(&rt, 0, app_text)
+-	}
+-	ordinary_before_surface := rt.stats
+-	surface_encodes_before := surface_renderer.encodes
+-	surface_uploads_before := surface_renderer.vertex_uploads
+-	surface_start := time.now()
+-	// Submit an initial three-frame burst before any programmatic resize. This
+-	// proves the configured frames-in-flight retirement path independently of
+-	// the swapchain invalidation that a resize can trigger.
+-	// The first burst also changes the text after the first submission, so a new
+-	// glyph is rasterized and uploaded while the old text submission is allowed
+-	// to remain in flight. The conservative full-page upload policy is exercised
+-	// by that mutation.
+-	// The following 300 iterations then drain before each resize and retire each
+-	// resized frame before the next resize, matching SDL's swapchain lifecycle.
+-	for step := -3; step < frame_limit; step += 1 {
+-		native_host_scratch_reset(&host_scratch)
+-		if step >= 0 && !manual_ime && !surface_stress {
+-			for len(in_flight) > 0 {
+-				if !wait_and_retire_oldest(device, &in_flight, &query_before_wait_true, &query_after_wait_true, &wait_count) {
+-					fail("SDL_WaitForGPUFences failed before resize")
+-				}
+-				retired += 1
+-			}
+-			if !sdl3.WaitForGPUIdle(device) {
+-				fail("SDL_WaitForGPUIdle failed before resize")
+-			}
+-			// SDL 3.4.14's Metal swapchain on this host does not reliably
+-			// expose a new drawable after a programmatic resize while the old
+-			// claim remains active. Recreate only the SDL window claim at this
+-			// validation boundary; the Alicorn runtime and GPU device remain
+-			// alive, and all old resources are already idle.
+-			sdl3.ReleaseWindowFromGPUDevice(device, window)
+-			resize_index := step % len(resize_widths)
+-			if !sdl3.SetWindowSize(window, resize_widths[resize_index], resize_heights[resize_index]) {
+-				fail("SDL_SetWindowSize failed during resize stress")
+-			}
+-			if !sdl3.ClaimWindowForGPUDevice(device, window) {
+-				fail("SDL_ClaimWindowForGPUDevice failed after resize")
+-			}
+-			if !sdl3.SetGPUAllowedFramesInFlight(device, 3) {
+-				fail("SDL_SetGPUAllowedFramesInFlight failed after resize")
+-			}
+-		}
+-
+-		pump_events(
+-			window,
+-			&rt,
+-			&metrics,
+-			&quit_requested,
+-			&logical_resize_events,
+-			&pixel_resize_events,
+-			&scale_events,
+-			&text_input_events,
+-			&composition_events,
+-			&app_text,
+-			manual_log=manual_ime,
+-			text_input_state=&text_input_state,
+-		)
+-		if quit_requested {
+-			if manual_ime {
+-				break
+-			}
+-			fail("window close requested during validation")
+-		}
+-		if !read_window_metrics(window, &metrics) {
+-			fail("window metrics became unavailable during resize stress")
+-		}
+-		if step == 0 || step == RESIZE_STRESS_ITERATIONS-1 {
+-			print_window_metrics("resize", metrics)
+-		}
+-
+-		sync_text_input_focus(window, &rt, &text_input_state)
+-		if surface_stress && step >= 0 {
+-			if step == 0 && len(in_flight) >= 3 {
+-				if !wait_and_retire_oldest(device, &in_flight, &query_before_wait_true, &query_after_wait_true, &wait_count) {
+-					fail("SDL_WaitForGPUFences failed before surface stress")
+-				}
+-				retired += 1
+-			}
+-			fill_surface_samples(&surface_samples, f32(step) * 0.08)
+-			if !alicorn.gpu_surface_update(&rt, nodes.surface, u64(step+1), surface_samples[:]) {
+-				fail("explicit GPU surface update failed during surface stress")
+-			}
+-		}
+-		// Preserve the fixture's second-frame atlas mutation without replacing
+-		// text that a real SDL_TEXT_INPUT event has already committed.
+-		if !manual_ime && step == -2 && text_input_events == 0 && composition_events == 0 {
+-			if len(app_text) > 0 { delete(app_text) }
+-			app_text, app_text_err = strings.clone(NATIVE_TEXT_MUTATED)
+-			if app_text_err != nil { fail("native text mutation allocation failed") }
+-		}
+-		should_submit := !manual_ime || rt.invalidated
+-		if surface_stress && step >= 0 {
+-			should_submit = rt.invalidated || alicorn.gpu_surface_needs_frame(&rt)
+-		}
+-		if surface_stress && step < 0 {
+-			// Pre-fill the three SDL frames-in-flight using the already retained
+-			// display list. This proves submission depth without re-running the
+-			// procedural application description.
+-			should_submit = true
+-		}
+-		if should_submit {
+-			text_value := app_text
+-			frame := u64(step+3)
+-			if manual_ime || surface_stress { frame = 0 }
+-			if rt.invalidated {
+-				nodes = render_native_ui(&rt, frame, text_value)
+-			}
+-			sync_text_input_focus(window, &rt, &text_input_state)
+-			command := sdl3.AcquireGPUCommandBuffer(device)
+-		if command == nil {
+-			fail("SDL_AcquireGPUCommandBuffer failed")
+-		}
+-		swapchain: ^sdl3.GPUTexture
+-		swap_w, swap_h: sdl3.Uint32
+-		if !sdl3.AcquireGPUSwapchainTexture(command, window, &swapchain, &swap_w, &swap_h) {
+-			_ = sdl3.CancelGPUCommandBuffer(command)
+-			fail("SDL_AcquireGPUSwapchainTexture failed")
+-		}
+-		if swapchain == nil || swap_w == 0 || swap_h == 0 {
+-			// SDL documents a nil texture as the normal signal that the
+-			// swapchain is temporarily unavailable. The oldest in-flight fence
+-			// has already been retired above. A device-idle drain also flushes
+-			// the swapchain's presentation bookkeeping on Metal before retrying.
+-			if !sdl3.WaitForGPUIdle(device) {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("SDL_WaitForGPUIdle before swapchain retry failed")
+-			}
+-			if !sdl3.AcquireGPUSwapchainTexture(command, window, &swapchain, &swap_w, &swap_h) {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("SDL_AcquireGPUSwapchainTexture retry failed")
+-			}
+-			if swapchain == nil || swap_w == 0 || swap_h == 0 {
+-				_ = sdl3.CancelGPUCommandBuffer(command)
+-				fail("SDL_AcquireGPUSwapchainTexture retry returned no drawable texture")
+-			}
+-		}
+-		metrics.pixel_width = int(swap_w)
+-		metrics.pixel_height = int(swap_h)
+-		logical_to_pixel_x := f32(swap_w) / f32(metrics.logical_width)
+-		logical_to_pixel_y := f32(swap_h) / f32(metrics.logical_height)
+-		if !draw_display_list(command, swapchain, swap_w, swap_h, &text_renderer, &surface_renderer, &solid_renderer, rt.display[:], logical_to_pixel_x, logical_to_pixel_y, scratch_allocator=host_scratch.allocator) {
+-			_ = sdl3.CancelGPUCommandBuffer(command)
+-			fail("Alicorn retained display-list pass failed")
+-		}
+-		fence := sdl3.SubmitGPUCommandBufferAndAcquireFence(command)
+-		if fence == nil {
+-			fail("SDL_SubmitGPUCommandBufferAndAcquireFence failed")
+-		}
+-		append(&in_flight, Native_In_Flight{fence})
+-			native_text_commit_submission(&text_renderer)
+-			native_surface_commit_submission(&surface_renderer)
+-			if surface_stress { alicorn.gpu_surface_frame_consumed(&rt) }
+-			alicorn.frame_submission_succeeded(&rt)
+-		submitted += 1
+-		rt.stats.gpu_submits += 1
+-		if len(in_flight) > max_in_flight { max_in_flight = len(in_flight) }
+-		if step >= 0 {
+-			if !wait_and_retire_oldest(device, &in_flight, &query_before_wait_true, &query_after_wait_true, &wait_count) {
+-				fail("SDL_WaitForGPUFences failed after resize")
+-			}
+-			retired += 1
+-		}
+-		}
+-		if manual_ime {
+-			sdl3.Delay(16)
+-		}
+-		if surface_stress && step >= 0 {
+-			sdl3.Delay(8)
+-		}
+-	}
+-
+-	if !sdl3.WaitForGPUIdle(device) {
+-		fail("SDL_WaitForGPUIdle failed during shutdown validation")
+-	}
+-	for entry in in_flight {
+-		sdl3.ReleaseGPUFence(device, entry.fence)
+-		retired += 1
+-	}
+-	clear(&in_flight)
+-	if text_input_state.active {
+-		if !sdl3.ClearComposition(window) { fail("SDL_ClearComposition failed during shutdown") }
+-		if !sdl3.StopTextInput(window) { fail("SDL_StopTextInput failed") }
+-		text_input_state.active = false
+-		text_input_state.owner = 0
+-	}
+-	if !sdl3.HideWindow(window) || !sdl3.ShowWindow(window) {
+-		fail("SDL hide/show window lifecycle failed")
+-	}
+-
+-	fmt.println(
+-		"SDL3/SDL_GPU retained compositor: PASS",
+-		"resize_iterations", RESIZE_STRESS_ITERATIONS,
+-		"submissions", submitted,
+-		"retired", retired,
+-		"display_commands", len(rt.display),
+-		"max_frames_in_flight", max_in_flight,
+-		"fence_waits", wait_count,
+-		"fence_query_before_wait_true", query_before_wait_true,
+-		"fence_query_after_wait_true", query_after_wait_true,
+-		"logical_resize_events", logical_resize_events,
+-		"pixel_resize_events", pixel_resize_events,
+-		"scale_events", scale_events,
+-		"text_input_events", text_input_events,
+-		"composition_events", composition_events,
+-		"text_shape_calls", rt.text_engine.shape_calls,
+-		"text_glyph_cache_hits", rt.text_engine.glyph_cache_hits,
+-		"text_glyph_cache_misses", rt.text_engine.glyph_cache_misses,
+-		"text_rasterizations", rt.text_engine.glyph_rasterizations,
+-		"text_atlas_pages", len(text_renderer.pages),
+-		"text_quads", len(text_renderer.draws),
+-		"text_atlas_full_page_uploads", text_renderer.atlas_uploads,
+-		"text_atlas_upload_bytes", text_renderer.atlas_upload_bytes,
+-		"text_readback_non_background", readback_non_background,
+-		"text_input_boundary", "focus-start-caret-area-stop",
+-		"pointer_adapter", "logical coordinates unchanged",
+-		"logical_to_physical", "compositor boundary only",
+-	)
+-	if surface_stress {
+-		surface_elapsed_ns := time.duration_nanoseconds(time.since(surface_start))
+-		fmt.println(
+-			"surface_stress", "frames", frame_limit,
+-			"wall_ns", surface_elapsed_ns,
+-			"surface_updates", rt.stats.surface_updates-ordinary_before_surface.surface_updates,
+-			"surface_frames_consumed", rt.stats.surface_frames_consumed-ordinary_before_surface.surface_frames_consumed,
+-			"surface_encodes", surface_renderer.encodes-surface_encodes_before,
+-			"surface_vertex_uploads", surface_renderer.vertex_uploads-surface_uploads_before,
+-			"surface_resource_creations", surface_renderer.resource_creations,
+-			"ordinary_descriptions", rt.stats.descriptions_emitted-ordinary_before_surface.descriptions_emitted,
+-			"ordinary_reconcile_visits", rt.stats.reconcile_nodes_visited-ordinary_before_surface.reconcile_nodes_visited,
+-			"ordinary_layout_visits", rt.stats.layout_nodes_visited-ordinary_before_surface.layout_nodes_visited,
+-			"ordinary_paint_visits", rt.stats.paint_nodes_visited-ordinary_before_surface.paint_nodes_visited,
+-			"ordinary_composition_visits", rt.stats.composition_nodes_visited-ordinary_before_surface.composition_nodes_visited,
+-			"max_frames_in_flight", max_in_flight,
+-		)
+-	}
+-	alicorn.destroy_runtime(&rt)
++	run_application_loop(window, device, &rt, &text_renderer, &surface_renderer, &solid_renderer, &metrics, application, smoke, input_debug, string(selected_driver), validation_timeout_seconds=validation_timeout_seconds, native_menu=&native_menu)
+ }

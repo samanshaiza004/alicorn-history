@@ -47,6 +47,9 @@ Patch_Source_Location :: struct {
 Patch_Span_Kind :: enum u32 {Metadata, Gap, Header, Lines, Binary}
 Patch_Span :: struct {kind: Patch_Span_Kind, source, first, count: u32}
 Patch_Hunk_Projection :: struct {first, end, first_body: int, collapsed: bool}
+// The span topology is fixed for one parsed patch. Folding updates cached
+// measures only; source edits or arbitrary splices require rebuilding and
+// publishing a fresh projection rather than mutating this index in place.
 Patch_Projection :: struct {
 	// UI owner destroys this BEFORE its immutable parsed patch. Worker data
 	// is adopted only after the request epoch has passed latest-wins checks.

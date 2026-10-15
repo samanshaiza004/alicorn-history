@@ -21,7 +21,7 @@ main :: proc() {
 	}
 	if has_argument("--self-test-folding") {
 		failures := 0
-		history_test_patch_projection(&failures)
+		history_test_patch_projection(&failures, repository)
 		if failures > 0 { os.exit(1) }
 		fmt.println("History folding PASS")
 		return
