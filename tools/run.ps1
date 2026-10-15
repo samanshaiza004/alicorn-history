@@ -2,7 +2,8 @@ param(
     [string]$Odin = $env:ALICORN_ODIN,
     [string]$Repository = '.',
     [switch]$Smoke,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$Folding
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +25,7 @@ $AccessKitLibraryDirectory = Split-Path -Parent $AccessKit.Library
 $AccessKitLinkerFlags = "/LIBPATH:$AccessKitLibraryDirectory bcrypt.lib ntdll.lib propsys.lib runtimeobject.lib uiautomationcore.lib userenv.lib ws2_32.lib"
 
 New-Item -ItemType Directory -Force -Path 'out' | Out-Null
-& $Odin build . "-extra-linker-flags:$AccessKitLinkerFlags" -out:out\alicorn-history.exe
+& $Odin build . "-extra-linker-flags:$AccessKitLinkerFlags" -out:out\alicorn-history.exe -thread-count:1
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $odinRoot = Split-Path -Parent $Odin
@@ -32,8 +33,9 @@ $sdlDll = Join-Path $odinRoot 'vendor\sdl3\SDL3.dll'
 if (-not (Test-Path -LiteralPath $sdlDll -PathType Leaf)) { throw "SDL3.dll was not found at $sdlDll" }
 Copy-Item -LiteralPath $sdlDll -Destination 'out\SDL3.dll' -Force
 
-$args = @($Repository)
-if ($Smoke) { $args += '--smoke' }
-if ($SelfTest) { $args += '--self-test' }
-& .\out\alicorn-history.exe @args
+$historyLaunchArgs = @($Repository)
+if ($Smoke) { $historyLaunchArgs += '--smoke' }
+if ($SelfTest) { $historyLaunchArgs += '--self-test' }
+if ($Folding) { $historyLaunchArgs += '--folding' }
+& .\out\alicorn-history.exe @historyLaunchArgs
 exit $LASTEXITCODE

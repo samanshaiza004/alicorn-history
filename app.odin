@@ -48,6 +48,18 @@ History_App :: struct {
 	patch:               File_Patch,
 	patch_loading:       bool,
 	patch_error:         string,
+	folding_enabled: bool,
+	patch_projection: Patch_Projection,
+	patch_projection_ready: bool,
+	patch_selection: Patch_Target,
+	patch_view_rows: [dynamic]Patch_Projection_Row,
+	patch_view_anchor: Patch_Target,
+	patch_view_fraction: Patch_Pixel_Y,
+	patch_anchor_offset: Patch_Pixel_Y,
+	patch_anchor_pending: bool,
+	patch_hunk_navigation_pending: bool,
+	patch_pending_hunk: Patch_Hunk_Ordinal,
+	fold_profile: History_Fold_Profile,
 	select_first_on_load: bool,
 	result_count:        u64,
 	build_count:         u64,
@@ -92,7 +104,10 @@ history_app_destroy :: proc(app: ^History_App) {
 	git_refs_destroy(app.refs)
 	if app.ref_rows != nil { delete(app.ref_rows) }
 	commit_detail_destroy(&app.detail)
-	file_patch_destroy(&app.patch)
+	history_clear_patch(app)
+	delete(app.patch_view_rows)
+	delete(app.fold_profile.ordinary_builds)
+	delete(app.fold_profile.fold_builds)
 	delete(app.visible)
 	delete(app.graph_segments)
 	delete(app.graph_circles)
@@ -182,7 +197,7 @@ history_reset_detail_storage :: proc(app: ^History_App) {
 }
 
 history_reset_patch_storage :: proc(app: ^History_App) {
-	file_patch_destroy(&app.patch)
+	history_clear_patch(app)
 	app.selected_patch_hunk = 0
 	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
@@ -241,7 +256,7 @@ history_worker_submit_patch :: proc(app: ^History_App) -> bool {
 	file := app.detail.files[app.selected_file_index]
 	app.next_patch_id += 1
 	app.latest_patch_id = app.next_patch_id
-	file_patch_destroy(&app.patch)
+	history_clear_patch(app)
 	app.selected_patch_hunk = 0
 	app.patch_scroll_reset_pending = true
 	if len(app.patch_error) > 0 { delete(app.patch_error) }
@@ -285,6 +300,7 @@ history_worker_wake :: proc(data: rawptr) {
 history_on_start :: proc(state: rawptr, waker: host.Application_Waker) {
 	app := cast(^History_App)state
 	app.waker = waker
+	if app.fold_profile.enabled { history_profile_schedule(app); return }
 	git_worker_set_waker(&app.worker, Git_Waker{data=rawptr(app), wake=history_worker_wake})
 	if !git_worker_start(&app.worker) {
 		app.error_text, _ = strings.clone("Git worker could not start")
@@ -300,6 +316,7 @@ history_on_start :: proc(state: rawptr, waker: host.Application_Waker) {
 history_on_services :: proc(state: rawptr, services: host.Application_Services) {
 	app := cast(^History_App)state
 	app.dialogs = services.dialogs
+	if app.fold_profile.enabled { app.fold_profile.scheduler = services.scheduler }
 }
 
 history_open_repository :: proc(app: ^History_App, rt: ^alicorn.Runtime) {
@@ -352,6 +369,7 @@ history_adopt_result :: proc(app: ^History_App, result: ^History_Result) -> bool
 		app.patch = result.patch
 		result.patch = {}
 		history_patch_prepare_display(&app.patch)
+		if len(result.error_text) == 0 { history_prepare_patch_projection(app) }
 		app.patch_error = result.error_text
 		result.error_text = ""
 		app.patch_loading = false

@@ -53,6 +53,52 @@ The Windows record covers a local build, native launch, selected-commit detail
 and patch loading, and a true-idle proof. This repository does not currently
 run Windows CI.
 
+## Experimental folding projection — Alicorn #50
+
+Enable the binary block projection explicitly:
+
+```powershell
+.\tools\run.ps1 -Repository C:\path\to\repository -Folding
+```
+
+The executable and Unix wrapper also accept `--folding`. A hunk header has a
+Collapse/Expand control; its collapsed body becomes one expandable placeholder.
+Select a source row using its gutter marker. The selection keeps the same
+source identity when its hunk is hidden, and reappears on expansion. Fold
+controls stay visible while the code is horizontally scrolled.
+
+The view preserves the top source row and fractional row offset across folds.
+When that row is hidden, it resolves to its hunk placeholder until expanded.
+Later scrolling or explicit hunk navigation replaces that intent. Selection
+here is by source row; the feature does not provide byte-range text selection.
+
+The UI owns a compact projection over immutable parsed hunks. Background Git
+results still pass the existing request-generation checks before adoption.
+Public source, display, hunk and pixel queries use distinct coordinate types;
+line numbers are one-based and display rows/hunk indexes are zero-based. No
+tree lock or shared mutable projection is introduced. The worker's expanded
+display array is released after compact preparation succeeds; a preparation
+failure retains the existing display fallback.
+
+This is a dogfood of fixed blocks with a binary summary directory. Whole-hunk
+folding updates existing blocks, including hunks crossing multiple blocks.
+It does not require general B+ tree insertion, deletion, or balancing. Findings,
+measurements, and remaining gates are in [the validation record](research/folding-projection.md).
+
+Run the focused correctness and type contracts, or the bounded Windows native
+profile (one compiler thread and one native process at a time):
+
+```powershell
+.\out\alicorn-history.exe . --self-test-folding
+.\tools\check_folding_types.ps1
+.\tools\profile_folding.ps1
+```
+
+`--self-test` also includes the folding checks. The native profiler uses the
+real scroll-change patch at History `3a22f38`, runs explicit finite scheduled
+actions, and captures actual rendered viewports. Profiling callbacks are enabled
+only by its command-line modes; ordinary application use has no periodic tick.
+
 ## Phase 1–5 scope
 
 - repository path and current branch summary;

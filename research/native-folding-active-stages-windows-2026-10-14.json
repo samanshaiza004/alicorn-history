@@ -1,0 +1,1268 @@
+[
+  {
+    "trial": 1,
+    "mode": "expanded",
+    "capture": "20261015T005401.605Z-0001",
+    "ordinary_active_cpu_p95_ns": 3060900,
+    "samples": [
+      {
+        "sample": 1,
+        "build_ns": 1781400,
+        "encode_ns": 905800,
+        "submit_ns": 373700,
+        "active_cpu_ns": 3060900
+      },
+      {
+        "sample": 9,
+        "build_ns": 1532200,
+        "encode_ns": 898500,
+        "submit_ns": 957100,
+        "active_cpu_ns": 3387800
+      },
+      {
+        "sample": 10,
+        "build_ns": 1098900,
+        "encode_ns": 765600,
+        "submit_ns": 116000,
+        "active_cpu_ns": 1980500
+      },
+      {
+        "sample": 11,
+        "build_ns": 1042900,
+        "encode_ns": 632100,
+        "submit_ns": 118000,
+        "active_cpu_ns": 1793000
+      },
+      {
+        "sample": 12,
+        "build_ns": 902400,
+        "encode_ns": 823500,
+        "submit_ns": 237600,
+        "active_cpu_ns": 1963500
+      },
+      {
+        "sample": 13,
+        "build_ns": 971100,
+        "encode_ns": 679500,
+        "submit_ns": 215200,
+        "active_cpu_ns": 1865800
+      },
+      {
+        "sample": 14,
+        "build_ns": 1346000,
+        "encode_ns": 745300,
+        "submit_ns": 185100,
+        "active_cpu_ns": 2276400
+      },
+      {
+        "sample": 15,
+        "build_ns": 1036800,
+        "encode_ns": 694600,
+        "submit_ns": 223000,
+        "active_cpu_ns": 1954400
+      },
+      {
+        "sample": 16,
+        "build_ns": 1267000,
+        "encode_ns": 276700,
+        "submit_ns": 232400,
+        "active_cpu_ns": 1776100
+      },
+      {
+        "sample": 17,
+        "build_ns": 1311500,
+        "encode_ns": 649100,
+        "submit_ns": 217100,
+        "active_cpu_ns": 2177700
+      },
+      {
+        "sample": 18,
+        "build_ns": 978000,
+        "encode_ns": 767000,
+        "submit_ns": 187000,
+        "active_cpu_ns": 1932000
+      },
+      {
+        "sample": 19,
+        "build_ns": 1029300,
+        "encode_ns": 206000,
+        "submit_ns": 136400,
+        "active_cpu_ns": 1371700
+      },
+      {
+        "sample": 20,
+        "build_ns": 989900,
+        "encode_ns": 216700,
+        "submit_ns": 157000,
+        "active_cpu_ns": 1363600
+      },
+      {
+        "sample": 21,
+        "build_ns": 1027800,
+        "encode_ns": 235300,
+        "submit_ns": 198100,
+        "active_cpu_ns": 1461200
+      },
+      {
+        "sample": 22,
+        "build_ns": 944600,
+        "encode_ns": 243800,
+        "submit_ns": 183400,
+        "active_cpu_ns": 1371800
+      },
+      {
+        "sample": 23,
+        "build_ns": 1063700,
+        "encode_ns": 287400,
+        "submit_ns": 212700,
+        "active_cpu_ns": 1563800
+      },
+      {
+        "sample": 24,
+        "build_ns": 874600,
+        "encode_ns": 245100,
+        "submit_ns": 191500,
+        "active_cpu_ns": 1311200
+      },
+      {
+        "sample": 25,
+        "build_ns": 1180100,
+        "encode_ns": 275800,
+        "submit_ns": 204000,
+        "active_cpu_ns": 1659900
+      },
+      {
+        "sample": 26,
+        "build_ns": 935800,
+        "encode_ns": 220300,
+        "submit_ns": 139100,
+        "active_cpu_ns": 1295200
+      },
+      {
+        "sample": 27,
+        "build_ns": 950800,
+        "encode_ns": 226300,
+        "submit_ns": 161600,
+        "active_cpu_ns": 1338700
+      },
+      {
+        "sample": 28,
+        "build_ns": 820200,
+        "encode_ns": 196600,
+        "submit_ns": 114100,
+        "active_cpu_ns": 1130900
+      },
+      {
+        "sample": 29,
+        "build_ns": 686300,
+        "encode_ns": 194100,
+        "submit_ns": 118300,
+        "active_cpu_ns": 998700
+      },
+      {
+        "sample": 30,
+        "build_ns": 775100,
+        "encode_ns": 180500,
+        "submit_ns": 120500,
+        "active_cpu_ns": 1076100
+      },
+      {
+        "sample": 31,
+        "build_ns": 752100,
+        "encode_ns": 161000,
+        "submit_ns": 113500,
+        "active_cpu_ns": 1026600
+      },
+      {
+        "sample": 32,
+        "build_ns": 639800,
+        "encode_ns": 180700,
+        "submit_ns": 105100,
+        "active_cpu_ns": 925600
+      },
+      {
+        "sample": 33,
+        "build_ns": 589300,
+        "encode_ns": 166500,
+        "submit_ns": 111400,
+        "active_cpu_ns": 867200
+      },
+      {
+        "sample": 34,
+        "build_ns": 587800,
+        "encode_ns": 184500,
+        "submit_ns": 110600,
+        "active_cpu_ns": 882900
+      },
+      {
+        "sample": 35,
+        "build_ns": 618200,
+        "encode_ns": 178400,
+        "submit_ns": 110100,
+        "active_cpu_ns": 906700
+      },
+      {
+        "sample": 36,
+        "build_ns": 906700,
+        "encode_ns": 180000,
+        "submit_ns": 107400,
+        "active_cpu_ns": 1194100
+      }
+    ]
+  },
+  {
+    "trial": 1,
+    "mode": "folding",
+    "capture": "20261015T005405.033Z-0001",
+    "ordinary_active_cpu_p95_ns": 2230900,
+    "samples": [
+      {
+        "sample": 9,
+        "build_ns": 1234600,
+        "encode_ns": 728400,
+        "submit_ns": 106100,
+        "active_cpu_ns": 2069100
+      },
+      {
+        "sample": 10,
+        "build_ns": 1037600,
+        "encode_ns": 745200,
+        "submit_ns": 115400,
+        "active_cpu_ns": 1898200
+      },
+      {
+        "sample": 11,
+        "build_ns": 946800,
+        "encode_ns": 805200,
+        "submit_ns": 235800,
+        "active_cpu_ns": 1987800
+      },
+      {
+        "sample": 12,
+        "build_ns": 1008000,
+        "encode_ns": 735200,
+        "submit_ns": 239500,
+        "active_cpu_ns": 1982700
+      },
+      {
+        "sample": 13,
+        "build_ns": 1094400,
+        "encode_ns": 898100,
+        "submit_ns": 238400,
+        "active_cpu_ns": 2230900
+      },
+      {
+        "sample": 14,
+        "build_ns": 1491700,
+        "encode_ns": 685200,
+        "submit_ns": 205200,
+        "active_cpu_ns": 2382100
+      },
+      {
+        "sample": 15,
+        "build_ns": 826900,
+        "encode_ns": 727500,
+        "submit_ns": 112300,
+        "active_cpu_ns": 1666700
+      },
+      {
+        "sample": 16,
+        "build_ns": 956600,
+        "encode_ns": 252700,
+        "submit_ns": 221500,
+        "active_cpu_ns": 1430800
+      },
+      {
+        "sample": 17,
+        "build_ns": 1060800,
+        "encode_ns": 597500,
+        "submit_ns": 108800,
+        "active_cpu_ns": 1767100
+      },
+      {
+        "sample": 18,
+        "build_ns": 686900,
+        "encode_ns": 612300,
+        "submit_ns": 109300,
+        "active_cpu_ns": 1408500
+      },
+      {
+        "sample": 19,
+        "build_ns": 897100,
+        "encode_ns": 188600,
+        "submit_ns": 100500,
+        "active_cpu_ns": 1186200
+      },
+      {
+        "sample": 20,
+        "build_ns": 1096400,
+        "encode_ns": 252800,
+        "submit_ns": 235400,
+        "active_cpu_ns": 1584600
+      },
+      {
+        "sample": 21,
+        "build_ns": 725900,
+        "encode_ns": 210000,
+        "submit_ns": 106700,
+        "active_cpu_ns": 1042600
+      },
+      {
+        "sample": 22,
+        "build_ns": 617100,
+        "encode_ns": 186500,
+        "submit_ns": 108100,
+        "active_cpu_ns": 911700
+      },
+      {
+        "sample": 23,
+        "build_ns": 819700,
+        "encode_ns": 204300,
+        "submit_ns": 107200,
+        "active_cpu_ns": 1131200
+      },
+      {
+        "sample": 24,
+        "build_ns": 591200,
+        "encode_ns": 191400,
+        "submit_ns": 107500,
+        "active_cpu_ns": 890100
+      },
+      {
+        "sample": 25,
+        "build_ns": 1095500,
+        "encode_ns": 255600,
+        "submit_ns": 222500,
+        "active_cpu_ns": 1573600
+      },
+      {
+        "sample": 26,
+        "build_ns": 838300,
+        "encode_ns": 281600,
+        "submit_ns": 165200,
+        "active_cpu_ns": 1285100
+      },
+      {
+        "sample": 27,
+        "build_ns": 1291700,
+        "encode_ns": 278500,
+        "submit_ns": 197500,
+        "active_cpu_ns": 1767700
+      },
+      {
+        "sample": 28,
+        "build_ns": 1137200,
+        "encode_ns": 259400,
+        "submit_ns": 224200,
+        "active_cpu_ns": 1620800
+      },
+      {
+        "sample": 29,
+        "build_ns": 1078400,
+        "encode_ns": 313900,
+        "submit_ns": 231500,
+        "active_cpu_ns": 1623800
+      },
+      {
+        "sample": 30,
+        "build_ns": 1279900,
+        "encode_ns": 340800,
+        "submit_ns": 270000,
+        "active_cpu_ns": 1890700
+      },
+      {
+        "sample": 31,
+        "build_ns": 1182800,
+        "encode_ns": 280400,
+        "submit_ns": 338200,
+        "active_cpu_ns": 1801400
+      },
+      {
+        "sample": 32,
+        "build_ns": 959700,
+        "encode_ns": 258100,
+        "submit_ns": 190100,
+        "active_cpu_ns": 1407900
+      },
+      {
+        "sample": 33,
+        "build_ns": 769300,
+        "encode_ns": 240600,
+        "submit_ns": 153200,
+        "active_cpu_ns": 1163100
+      },
+      {
+        "sample": 34,
+        "build_ns": 665500,
+        "encode_ns": 215600,
+        "submit_ns": 121200,
+        "active_cpu_ns": 1002300
+      },
+      {
+        "sample": 35,
+        "build_ns": 857100,
+        "encode_ns": 202500,
+        "submit_ns": 108000,
+        "active_cpu_ns": 1167600
+      },
+      {
+        "sample": 36,
+        "build_ns": 1094600,
+        "encode_ns": 229900,
+        "submit_ns": 147000,
+        "active_cpu_ns": 1471500
+      },
+      {
+        "sample": 37,
+        "build_ns": 703100,
+        "encode_ns": 229200,
+        "submit_ns": 117700,
+        "active_cpu_ns": 1050000
+      }
+    ]
+  },
+  {
+    "trial": 2,
+    "mode": "expanded",
+    "capture": "20261015T005408.432Z-0001",
+    "ordinary_active_cpu_p95_ns": 2657900,
+    "samples": [
+      {
+        "sample": 9,
+        "build_ns": 1475800,
+        "encode_ns": 910100,
+        "submit_ns": 1017900,
+        "active_cpu_ns": 3403800
+      },
+      {
+        "sample": 10,
+        "build_ns": 1504500,
+        "encode_ns": 929100,
+        "submit_ns": 224300,
+        "active_cpu_ns": 2657900
+      },
+      {
+        "sample": 11,
+        "build_ns": 966200,
+        "encode_ns": 718800,
+        "submit_ns": 217200,
+        "active_cpu_ns": 1902200
+      },
+      {
+        "sample": 12,
+        "build_ns": 693200,
+        "encode_ns": 677000,
+        "submit_ns": 136600,
+        "active_cpu_ns": 1506800
+      },
+      {
+        "sample": 13,
+        "build_ns": 851200,
+        "encode_ns": 700200,
+        "submit_ns": 228700,
+        "active_cpu_ns": 1780100
+      },
+      {
+        "sample": 14,
+        "build_ns": 939200,
+        "encode_ns": 610500,
+        "submit_ns": 108000,
+        "active_cpu_ns": 1657700
+      },
+      {
+        "sample": 15,
+        "build_ns": 706700,
+        "encode_ns": 691400,
+        "submit_ns": 113600,
+        "active_cpu_ns": 1511700
+      },
+      {
+        "sample": 16,
+        "build_ns": 941300,
+        "encode_ns": 248700,
+        "submit_ns": 232000,
+        "active_cpu_ns": 1422000
+      },
+      {
+        "sample": 17,
+        "build_ns": 1211100,
+        "encode_ns": 695600,
+        "submit_ns": 231500,
+        "active_cpu_ns": 2138200
+      },
+      {
+        "sample": 18,
+        "build_ns": 849400,
+        "encode_ns": 673600,
+        "submit_ns": 182500,
+        "active_cpu_ns": 1705500
+      },
+      {
+        "sample": 19,
+        "build_ns": 1310200,
+        "encode_ns": 251300,
+        "submit_ns": 232600,
+        "active_cpu_ns": 1794100
+      },
+      {
+        "sample": 20,
+        "build_ns": 1090200,
+        "encode_ns": 239100,
+        "submit_ns": 223000,
+        "active_cpu_ns": 1552300
+      },
+      {
+        "sample": 21,
+        "build_ns": 872300,
+        "encode_ns": 197600,
+        "submit_ns": 118800,
+        "active_cpu_ns": 1188700
+      },
+      {
+        "sample": 22,
+        "build_ns": 891600,
+        "encode_ns": 271000,
+        "submit_ns": 239100,
+        "active_cpu_ns": 1401700
+      },
+      {
+        "sample": 23,
+        "build_ns": 604200,
+        "encode_ns": 212600,
+        "submit_ns": 132400,
+        "active_cpu_ns": 949200
+      },
+      {
+        "sample": 24,
+        "build_ns": 642700,
+        "encode_ns": 189000,
+        "submit_ns": 111000,
+        "active_cpu_ns": 942700
+      },
+      {
+        "sample": 25,
+        "build_ns": 843100,
+        "encode_ns": 250800,
+        "submit_ns": 173000,
+        "active_cpu_ns": 1266900
+      },
+      {
+        "sample": 26,
+        "build_ns": 566100,
+        "encode_ns": 186600,
+        "submit_ns": 106300,
+        "active_cpu_ns": 859000
+      },
+      {
+        "sample": 27,
+        "build_ns": 1019200,
+        "encode_ns": 192000,
+        "submit_ns": 118800,
+        "active_cpu_ns": 1330000
+      },
+      {
+        "sample": 28,
+        "build_ns": 973000,
+        "encode_ns": 329500,
+        "submit_ns": 228500,
+        "active_cpu_ns": 1531000
+      },
+      {
+        "sample": 29,
+        "build_ns": 907600,
+        "encode_ns": 256800,
+        "submit_ns": 231900,
+        "active_cpu_ns": 1396300
+      },
+      {
+        "sample": 30,
+        "build_ns": 734400,
+        "encode_ns": 179700,
+        "submit_ns": 111000,
+        "active_cpu_ns": 1025100
+      },
+      {
+        "sample": 31,
+        "build_ns": 962400,
+        "encode_ns": 228100,
+        "submit_ns": 229000,
+        "active_cpu_ns": 1419500
+      },
+      {
+        "sample": 32,
+        "build_ns": 612600,
+        "encode_ns": 204100,
+        "submit_ns": 108000,
+        "active_cpu_ns": 924700
+      },
+      {
+        "sample": 33,
+        "build_ns": 772700,
+        "encode_ns": 243700,
+        "submit_ns": 239400,
+        "active_cpu_ns": 1255800
+      },
+      {
+        "sample": 34,
+        "build_ns": 599900,
+        "encode_ns": 192700,
+        "submit_ns": 108000,
+        "active_cpu_ns": 900600
+      },
+      {
+        "sample": 35,
+        "build_ns": 613100,
+        "encode_ns": 198000,
+        "submit_ns": 108000,
+        "active_cpu_ns": 919100
+      },
+      {
+        "sample": 36,
+        "build_ns": 923800,
+        "encode_ns": 187400,
+        "submit_ns": 103800,
+        "active_cpu_ns": 1215000
+      },
+      {
+        "sample": 37,
+        "build_ns": 777800,
+        "encode_ns": 267500,
+        "submit_ns": 222000,
+        "active_cpu_ns": 1267300
+      }
+    ]
+  },
+  {
+    "trial": 2,
+    "mode": "folding",
+    "capture": "20261015T005411.844Z-0001",
+    "ordinary_active_cpu_p95_ns": 1778700,
+    "samples": [
+      {
+        "sample": 8,
+        "build_ns": 1377800,
+        "encode_ns": 174900,
+        "submit_ns": 121600,
+        "active_cpu_ns": 1674300
+      },
+      {
+        "sample": 9,
+        "build_ns": 1339500,
+        "encode_ns": 722400,
+        "submit_ns": 219700,
+        "active_cpu_ns": 2281600
+      },
+      {
+        "sample": 10,
+        "build_ns": 841500,
+        "encode_ns": 751400,
+        "submit_ns": 117000,
+        "active_cpu_ns": 1709900
+      },
+      {
+        "sample": 11,
+        "build_ns": 639600,
+        "encode_ns": 600800,
+        "submit_ns": 110300,
+        "active_cpu_ns": 1350700
+      },
+      {
+        "sample": 12,
+        "build_ns": 692800,
+        "encode_ns": 630200,
+        "submit_ns": 112600,
+        "active_cpu_ns": 1435600
+      },
+      {
+        "sample": 13,
+        "build_ns": 760000,
+        "encode_ns": 629800,
+        "submit_ns": 108000,
+        "active_cpu_ns": 1497800
+      },
+      {
+        "sample": 14,
+        "build_ns": 1053200,
+        "encode_ns": 590100,
+        "submit_ns": 110800,
+        "active_cpu_ns": 1754100
+      },
+      {
+        "sample": 15,
+        "build_ns": 793400,
+        "encode_ns": 702000,
+        "submit_ns": 117200,
+        "active_cpu_ns": 1612600
+      },
+      {
+        "sample": 16,
+        "build_ns": 1001200,
+        "encode_ns": 251600,
+        "submit_ns": 236800,
+        "active_cpu_ns": 1489600
+      },
+      {
+        "sample": 17,
+        "build_ns": 1065700,
+        "encode_ns": 604600,
+        "submit_ns": 108400,
+        "active_cpu_ns": 1778700
+      },
+      {
+        "sample": 18,
+        "build_ns": 762900,
+        "encode_ns": 631500,
+        "submit_ns": 141600,
+        "active_cpu_ns": 1536000
+      },
+      {
+        "sample": 19,
+        "build_ns": 1078000,
+        "encode_ns": 250900,
+        "submit_ns": 223400,
+        "active_cpu_ns": 1552300
+      },
+      {
+        "sample": 20,
+        "build_ns": 875700,
+        "encode_ns": 178800,
+        "submit_ns": 118600,
+        "active_cpu_ns": 1173100
+      },
+      {
+        "sample": 21,
+        "build_ns": 926700,
+        "encode_ns": 280500,
+        "submit_ns": 206800,
+        "active_cpu_ns": 1414000
+      },
+      {
+        "sample": 22,
+        "build_ns": 634700,
+        "encode_ns": 179100,
+        "submit_ns": 116200,
+        "active_cpu_ns": 930000
+      },
+      {
+        "sample": 23,
+        "build_ns": 793600,
+        "encode_ns": 253600,
+        "submit_ns": 222700,
+        "active_cpu_ns": 1269900
+      },
+      {
+        "sample": 24,
+        "build_ns": 612500,
+        "encode_ns": 181800,
+        "submit_ns": 114500,
+        "active_cpu_ns": 908800
+      },
+      {
+        "sample": 25,
+        "build_ns": 884100,
+        "encode_ns": 181800,
+        "submit_ns": 100300,
+        "active_cpu_ns": 1166200
+      },
+      {
+        "sample": 26,
+        "build_ns": 831100,
+        "encode_ns": 254500,
+        "submit_ns": 229000,
+        "active_cpu_ns": 1314600
+      },
+      {
+        "sample": 27,
+        "build_ns": 965400,
+        "encode_ns": 184800,
+        "submit_ns": 103800,
+        "active_cpu_ns": 1254000
+      },
+      {
+        "sample": 28,
+        "build_ns": 1000700,
+        "encode_ns": 242600,
+        "submit_ns": 226500,
+        "active_cpu_ns": 1469800
+      },
+      {
+        "sample": 29,
+        "build_ns": 702600,
+        "encode_ns": 193900,
+        "submit_ns": 111500,
+        "active_cpu_ns": 1008000
+      },
+      {
+        "sample": 30,
+        "build_ns": 1203500,
+        "encode_ns": 298100,
+        "submit_ns": 273400,
+        "active_cpu_ns": 1775000
+      },
+      {
+        "sample": 31,
+        "build_ns": 1186600,
+        "encode_ns": 276900,
+        "submit_ns": 251400,
+        "active_cpu_ns": 1714900
+      },
+      {
+        "sample": 32,
+        "build_ns": 1033400,
+        "encode_ns": 308800,
+        "submit_ns": 276100,
+        "active_cpu_ns": 1618300
+      },
+      {
+        "sample": 33,
+        "build_ns": 986200,
+        "encode_ns": 291100,
+        "submit_ns": 264300,
+        "active_cpu_ns": 1541600
+      },
+      {
+        "sample": 34,
+        "build_ns": 968800,
+        "encode_ns": 304100,
+        "submit_ns": 257800,
+        "active_cpu_ns": 1530700
+      },
+      {
+        "sample": 35,
+        "build_ns": 1018200,
+        "encode_ns": 298900,
+        "submit_ns": 238000,
+        "active_cpu_ns": 1555100
+      },
+      {
+        "sample": 36,
+        "build_ns": 1112500,
+        "encode_ns": 231100,
+        "submit_ns": 153700,
+        "active_cpu_ns": 1497300
+      }
+    ]
+  },
+  {
+    "trial": 3,
+    "mode": "expanded",
+    "capture": "20261015T005415.222Z-0001",
+    "ordinary_active_cpu_p95_ns": 2712700,
+    "samples": [
+      {
+        "sample": 1,
+        "build_ns": 1521100,
+        "encode_ns": 793700,
+        "submit_ns": 397900,
+        "active_cpu_ns": 2712700
+      },
+      {
+        "sample": 9,
+        "build_ns": 1219200,
+        "encode_ns": 777700,
+        "submit_ns": 1090100,
+        "active_cpu_ns": 3087000
+      },
+      {
+        "sample": 10,
+        "build_ns": 932600,
+        "encode_ns": 793800,
+        "submit_ns": 119900,
+        "active_cpu_ns": 1846300
+      },
+      {
+        "sample": 11,
+        "build_ns": 727300,
+        "encode_ns": 629400,
+        "submit_ns": 114900,
+        "active_cpu_ns": 1471600
+      },
+      {
+        "sample": 12,
+        "build_ns": 800700,
+        "encode_ns": 706900,
+        "submit_ns": 253100,
+        "active_cpu_ns": 1760700
+      },
+      {
+        "sample": 13,
+        "build_ns": 992000,
+        "encode_ns": 693300,
+        "submit_ns": 232600,
+        "active_cpu_ns": 1917900
+      },
+      {
+        "sample": 14,
+        "build_ns": 1248300,
+        "encode_ns": 599900,
+        "submit_ns": 111300,
+        "active_cpu_ns": 1959500
+      },
+      {
+        "sample": 15,
+        "build_ns": 1004000,
+        "encode_ns": 689000,
+        "submit_ns": 118900,
+        "active_cpu_ns": 1811900
+      },
+      {
+        "sample": 16,
+        "build_ns": 1148300,
+        "encode_ns": 243600,
+        "submit_ns": 231300,
+        "active_cpu_ns": 1623200
+      },
+      {
+        "sample": 17,
+        "build_ns": 1201800,
+        "encode_ns": 643900,
+        "submit_ns": 229200,
+        "active_cpu_ns": 2074900
+      },
+      {
+        "sample": 18,
+        "build_ns": 977400,
+        "encode_ns": 824200,
+        "submit_ns": 246000,
+        "active_cpu_ns": 2047600
+      },
+      {
+        "sample": 19,
+        "build_ns": 1267600,
+        "encode_ns": 279100,
+        "submit_ns": 249900,
+        "active_cpu_ns": 1796600
+      },
+      {
+        "sample": 20,
+        "build_ns": 1346900,
+        "encode_ns": 294800,
+        "submit_ns": 246800,
+        "active_cpu_ns": 1888500
+      },
+      {
+        "sample": 21,
+        "build_ns": 1046100,
+        "encode_ns": 295300,
+        "submit_ns": 267300,
+        "active_cpu_ns": 1608700
+      },
+      {
+        "sample": 22,
+        "build_ns": 766600,
+        "encode_ns": 234700,
+        "submit_ns": 237400,
+        "active_cpu_ns": 1238700
+      },
+      {
+        "sample": 23,
+        "build_ns": 843200,
+        "encode_ns": 297200,
+        "submit_ns": 263500,
+        "active_cpu_ns": 1403900
+      },
+      {
+        "sample": 24,
+        "build_ns": 852000,
+        "encode_ns": 255400,
+        "submit_ns": 211700,
+        "active_cpu_ns": 1319100
+      },
+      {
+        "sample": 25,
+        "build_ns": 1039400,
+        "encode_ns": 210900,
+        "submit_ns": 153500,
+        "active_cpu_ns": 1403800
+      },
+      {
+        "sample": 26,
+        "build_ns": 567200,
+        "encode_ns": 182800,
+        "submit_ns": 112300,
+        "active_cpu_ns": 862300
+      },
+      {
+        "sample": 27,
+        "build_ns": 919800,
+        "encode_ns": 185000,
+        "submit_ns": 115600,
+        "active_cpu_ns": 1220400
+      },
+      {
+        "sample": 28,
+        "build_ns": 940100,
+        "encode_ns": 230400,
+        "submit_ns": 215400,
+        "active_cpu_ns": 1385900
+      },
+      {
+        "sample": 29,
+        "build_ns": 836500,
+        "encode_ns": 252000,
+        "submit_ns": 222800,
+        "active_cpu_ns": 1311300
+      },
+      {
+        "sample": 30,
+        "build_ns": 780300,
+        "encode_ns": 173300,
+        "submit_ns": 111000,
+        "active_cpu_ns": 1064600
+      },
+      {
+        "sample": 31,
+        "build_ns": 1048400,
+        "encode_ns": 189600,
+        "submit_ns": 159400,
+        "active_cpu_ns": 1397400
+      },
+      {
+        "sample": 32,
+        "build_ns": 722200,
+        "encode_ns": 205100,
+        "submit_ns": 124400,
+        "active_cpu_ns": 1051700
+      },
+      {
+        "sample": 33,
+        "build_ns": 784400,
+        "encode_ns": 237000,
+        "submit_ns": 228000,
+        "active_cpu_ns": 1249400
+      },
+      {
+        "sample": 34,
+        "build_ns": 793400,
+        "encode_ns": 249700,
+        "submit_ns": 273200,
+        "active_cpu_ns": 1316300
+      },
+      {
+        "sample": 35,
+        "build_ns": 841300,
+        "encode_ns": 241500,
+        "submit_ns": 221800,
+        "active_cpu_ns": 1304600
+      },
+      {
+        "sample": 36,
+        "build_ns": 1012100,
+        "encode_ns": 177200,
+        "submit_ns": 112800,
+        "active_cpu_ns": 1302100
+      }
+    ]
+  },
+  {
+    "trial": 3,
+    "mode": "folding",
+    "capture": "20261015T005418.631Z-0001",
+    "ordinary_active_cpu_p95_ns": 2395100,
+    "samples": [
+      {
+        "sample": 9,
+        "build_ns": 1472500,
+        "encode_ns": 711400,
+        "submit_ns": 211200,
+        "active_cpu_ns": 2395100
+      },
+      {
+        "sample": 10,
+        "build_ns": 1266100,
+        "encode_ns": 995400,
+        "submit_ns": 239900,
+        "active_cpu_ns": 2501400
+      },
+      {
+        "sample": 11,
+        "build_ns": 1031300,
+        "encode_ns": 713900,
+        "submit_ns": 217800,
+        "active_cpu_ns": 1963000
+      },
+      {
+        "sample": 12,
+        "build_ns": 977200,
+        "encode_ns": 748300,
+        "submit_ns": 226300,
+        "active_cpu_ns": 1951800
+      },
+      {
+        "sample": 13,
+        "build_ns": 856200,
+        "encode_ns": 722000,
+        "submit_ns": 208400,
+        "active_cpu_ns": 1786600
+      },
+      {
+        "sample": 14,
+        "build_ns": 1137000,
+        "encode_ns": 631900,
+        "submit_ns": 142500,
+        "active_cpu_ns": 1911400
+      },
+      {
+        "sample": 15,
+        "build_ns": 791400,
+        "encode_ns": 701600,
+        "submit_ns": 107800,
+        "active_cpu_ns": 1600800
+      },
+      {
+        "sample": 16,
+        "build_ns": 856600,
+        "encode_ns": 184200,
+        "submit_ns": 127100,
+        "active_cpu_ns": 1167900
+      },
+      {
+        "sample": 17,
+        "build_ns": 1084800,
+        "encode_ns": 599100,
+        "submit_ns": 119400,
+        "active_cpu_ns": 1803300
+      },
+      {
+        "sample": 18,
+        "build_ns": 921500,
+        "encode_ns": 648500,
+        "submit_ns": 157900,
+        "active_cpu_ns": 1727900
+      },
+      {
+        "sample": 19,
+        "build_ns": 891900,
+        "encode_ns": 193000,
+        "submit_ns": 107900,
+        "active_cpu_ns": 1192800
+      },
+      {
+        "sample": 20,
+        "build_ns": 868900,
+        "encode_ns": 178100,
+        "submit_ns": 111700,
+        "active_cpu_ns": 1158700
+      },
+      {
+        "sample": 21,
+        "build_ns": 728000,
+        "encode_ns": 202100,
+        "submit_ns": 113000,
+        "active_cpu_ns": 1043100
+      },
+      {
+        "sample": 22,
+        "build_ns": 841700,
+        "encode_ns": 241700,
+        "submit_ns": 249200,
+        "active_cpu_ns": 1332600
+      },
+      {
+        "sample": 23,
+        "build_ns": 1109900,
+        "encode_ns": 342600,
+        "submit_ns": 280800,
+        "active_cpu_ns": 1733300
+      },
+      {
+        "sample": 24,
+        "build_ns": 1161700,
+        "encode_ns": 290100,
+        "submit_ns": 264500,
+        "active_cpu_ns": 1716300
+      },
+      {
+        "sample": 25,
+        "build_ns": 1615600,
+        "encode_ns": 362200,
+        "submit_ns": 291300,
+        "active_cpu_ns": 2269100
+      },
+      {
+        "sample": 26,
+        "build_ns": 1182800,
+        "encode_ns": 303100,
+        "submit_ns": 267800,
+        "active_cpu_ns": 1753700
+      },
+      {
+        "sample": 27,
+        "build_ns": 1145000,
+        "encode_ns": 256900,
+        "submit_ns": 188100,
+        "active_cpu_ns": 1590000
+      },
+      {
+        "sample": 28,
+        "build_ns": 917000,
+        "encode_ns": 223900,
+        "submit_ns": 139200,
+        "active_cpu_ns": 1280100
+      },
+      {
+        "sample": 29,
+        "build_ns": 835800,
+        "encode_ns": 227000,
+        "submit_ns": 122700,
+        "active_cpu_ns": 1185500
+      },
+      {
+        "sample": 30,
+        "build_ns": 781300,
+        "encode_ns": 180800,
+        "submit_ns": 114700,
+        "active_cpu_ns": 1076800
+      },
+      {
+        "sample": 31,
+        "build_ns": 811900,
+        "encode_ns": 167200,
+        "submit_ns": 106000,
+        "active_cpu_ns": 1085100
+      },
+      {
+        "sample": 32,
+        "build_ns": 656100,
+        "encode_ns": 188300,
+        "submit_ns": 111000,
+        "active_cpu_ns": 955400
+      },
+      {
+        "sample": 33,
+        "build_ns": 823200,
+        "encode_ns": 238800,
+        "submit_ns": 227100,
+        "active_cpu_ns": 1289100
+      },
+      {
+        "sample": 34,
+        "build_ns": 627000,
+        "encode_ns": 195900,
+        "submit_ns": 115400,
+        "active_cpu_ns": 938300
+      },
+      {
+        "sample": 35,
+        "build_ns": 1182500,
+        "encode_ns": 253500,
+        "submit_ns": 234300,
+        "active_cpu_ns": 1670300
+      },
+      {
+        "sample": 36,
+        "build_ns": 965700,
+        "encode_ns": 184300,
+        "submit_ns": 116700,
+        "active_cpu_ns": 1266700
+      },
+      {
+        "sample": 37,
+        "build_ns": 636300,
+        "encode_ns": 198100,
+        "submit_ns": 104300,
+        "active_cpu_ns": 938700
+      }
+    ]
+  }
+]

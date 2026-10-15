@@ -302,6 +302,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	patch_hunk_scroll_node := alicorn.Node_ID(0)
 	patch_hunk_scroll_target := -1
 	patch_hunk_changed := false
+	fold_request := -1
 
 	root_style := alicorn.layout_style(padding=HISTORY_ROOT_PADDING, gap=8, clip=true)
 	root := alicorn.container_begin(&ui, .Root, label="history-root", style=root_style, color=HISTORY_BG)
@@ -586,6 +587,7 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			} else if app.patch.path == app.selected_file_path && (len(app.patch.hunks) > 0 || app.patch.binary || len(app.patch.metadata) > 0) {
 				patch_content_width := history_patch_content_width(app.patch)
 				patch_line_count := history_patch_display_count(app.patch)
+				if app.patch_projection_ready { patch_line_count = int(patch_projection_measure(&app.patch_projection).rows) }
 				hunk_count := len(app.patch.hunks)
 				if hunk_count > 0 {
 					if app.selected_patch_hunk >= hunk_count { app.selected_patch_hunk = hunk_count-1 }
@@ -640,6 +642,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 					}
 					if patch_hunk_changed {
 						patch_hunk_scroll_target = history_patch_hunk_display_index(app.patch, app.selected_patch_hunk)
+						app.patch_view_anchor = {}
+						if app.patch_projection_ready { target, ok := patch_projection_seek_hunk(&app.patch_projection, Patch_Hunk_Ordinal(app.selected_patch_hunk)); if ok { patch_hunk_scroll_target = int(target) } }
 					}
 				}
 				patch_list := alicorn.virtual_list_begin(
@@ -656,44 +660,18 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 				)
 				patch_hunk_scroll_node = patch_list.scroll.id
 				app.patch_scroll_node = patch_list.scroll.id
-				for position := patch_list.first; position < patch_list.last; position += 1 {
-					line, line_ok := history_patch_display_line(app.patch, position)
-					if !line_ok { continue }
-					color := history_diff_line_color(line.kind)
-					if line.hunk && line.hunk_index == app.selected_patch_hunk { color = SELECT_BG }
-					alicorn.container_begin(&ui, .Container, label="patch-line", key=alicorn.key_u64(u64(position)), style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT), color=color)
-					if line.hunk {
-						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=patch_content_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=6), font=alicorn.Font_Role.Monospace, text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM, overflow=.Clip})
-					} else {
-						old_text := ""
-						new_text := ""
-						if line.old_line > 0 { old_text = fmt.tprintf("%d", line.old_line) }
-						if line.new_line > 0 { new_text = fmt.tprintf("%d", line.new_line) }
-						marker := " "
-						if line.kind == .Addition { marker = "+" }
-						if line.kind == .Deletion { marker = "-" }
-						alicorn.container_begin(&ui, .Container, label="patch-line-number-gutter", style=alicorn.layout_style(.Row, width=HISTORY_PATCH_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT), color=HISTORY_PATCH_GUTTER_BG)
-						gutter_text_style := alicorn.Text_Style{overflow=.Clip}
-						old_number_id := alicorn.text(&ui, old_text, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_OLD_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
-						if len(old_text) > 0 {
-							span := [1]alicorn.Text_Paint_Span{{start=0, end=len(old_text), color=history_diff_gutter_color(line.kind), color_set=true}}
-							_ = alicorn.text_paint_spans(&ui, old_number_id, span[:])
-						}
-						new_number_id := alicorn.text(&ui, new_text, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_NEW_GUTTER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=4, align=.End), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
-						if len(new_text) > 0 {
-							span := [1]alicorn.Text_Paint_Span{{start=0, end=len(new_text), color=history_diff_gutter_color(line.kind), color_set=true}}
-							_ = alicorn.text_paint_spans(&ui, new_number_id, span[:])
-						}
-					marker_id := alicorn.text(&ui, marker, style=alicorn.layout_style(.Row, width=HISTORY_PATCH_MARKER_WIDTH, height=HISTORY_PATCH_LINE_HEIGHT, padding=2, align=.Center), font=alicorn.Font_Role.Monospace, text_style=gutter_text_style)
-					marker_span := [1]alicorn.Text_Paint_Span{{start=0, end=len(marker), color=history_diff_gutter_color(line.kind), color_set=true}}
-					_ = alicorn.text_paint_spans(&ui, marker_id, marker_span[:])
-						alicorn.container_end(&ui)
-						code_width := max(0, patch_content_width-HISTORY_PATCH_GUTTER_WIDTH)
-						alicorn.text(&ui, line.text, style=alicorn.layout_style(.Row, width=code_width, height=HISTORY_PATCH_LINE_HEIGHT, padding=4), font=alicorn.Font_Role.Monospace, text_style=alicorn.Text_Style{overflow=.Clip})
-					}
-					alicorn.container_end(&ui)
-				}
-				alicorn.virtual_list_end(&ui, patch_list)
+				if app.patch_projection_ready {
+                    needed := patch_list.last-patch_list.first
+                    resize(&app.patch_view_rows, needed)
+                    written := patch_projection_viewport(&app.patch_projection, Patch_Display_Row(patch_list.first), app.patch_view_rows[:])
+                    for i in 0..<written { history_build_patch_row(&ui, app, app.patch_view_rows[i], patch_content_width, patch_list.first+i, &fold_request) }
+                } else {
+                    for position := patch_list.first; position < patch_list.last; position += 1 {
+                        line, ok := history_patch_display_line(app.patch, position)
+                        if ok { history_build_patch_row(&ui, app, Patch_Projection_Row{line=line}, patch_content_width, position, &fold_request) }
+                    }
+                }
+                alicorn.virtual_list_end(&ui, patch_list)
 			} else if app.selected_file_index >= 0 {
 				file := app.detail.files[app.selected_file_index]
 				if file.additions > 0 || file.deletions > 0 {
@@ -711,6 +689,8 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	alicorn.split_end(&ui, outer_split)
 	history_reset_patch_scroll(app, rt)
 	alicorn.end_frame(&ui)
+	history_restore_patch_anchor(app, rt)
+	if fold_request >= 0 { _ = history_toggle_patch_hunk(app, rt, Patch_Hunk_Ordinal(fold_request)) }
 	if app.commit_graph_node == 0 {
 		app.graph_geometry_node = 0
 		app.graph_geometry_key = {}
@@ -771,7 +751,12 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 	}
 	if patch_hunk_changed {
 		alicorn.invalidate_root(rt, "history patch hunk changed")
-		if patch_hunk_scroll_node != 0 && patch_hunk_scroll_target >= 0 {
+		if app.patch_projection_ready {
+			app.patch_pending_hunk = Patch_Hunk_Ordinal(app.selected_patch_hunk)
+			app.patch_hunk_navigation_pending = true
+			app.patch_anchor_pending = false
+			app.patch_view_anchor = {}
+		} else if patch_hunk_scroll_node != 0 && patch_hunk_scroll_target >= 0 {
 			_ = history_scroll_patch_hunk_to_start(rt, patch_hunk_scroll_node, patch_hunk_scroll_target)
 		}
 	}

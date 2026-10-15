@@ -19,6 +19,13 @@ main :: proc() {
 		if !history_run_tests(repository) { os.exit(1) }
 		return
 	}
+	if has_argument("--self-test-folding") {
+		failures := 0
+		history_test_patch_projection(&failures)
+		if failures > 0 { os.exit(1) }
+		fmt.println("History folding PASS")
+		return
+	}
 	app := history_app_new(repository)
 	defer {
 		history_app_destroy(app)
@@ -26,6 +33,8 @@ main :: proc() {
 	}
 	if app == nil { os.exit(1) }
 	app.select_first_on_load = has_argument("--select-first")
+	app.folding_enabled = has_argument("--folding")
+	if has_argument("--profile-folding") || has_argument("--profile-expanded") { history_profile_prepare(app, has_argument("--profile-expanded")) }
 	application := host.Application{
 		state=rawptr(app),
 		title="Alicorn History",
@@ -42,7 +51,10 @@ main :: proc() {
 		on_wake=history_on_wake,
 		on_stop=history_on_stop,
 	}
+	if app.fold_profile.enabled { application.build = history_profile_build; application.on_scheduled_wake = history_profile_on_scheduled }
 	host.Run(application, has_argument("--smoke"))
+	history_profile_report(app)
+	if app.fold_profile.failures > 0 { os.exit(1) }
 	fmt.println("alicorn-history PASS", "commits", len(app.commits), "builds", app.build_count, "results", app.result_count)
 }
 
