@@ -99,6 +99,15 @@ real scroll-change patch at History `3a22f38`, runs explicit finite scheduled
 actions, and captures actual rendered viewports. Profiling callbacks are enabled
 only by its command-line modes; ordinary application use has no periodic tick.
 
+The positional directory selects the Git repository to inspect. Test fixtures
+come from the History source checkout, independently. By default, tests resolve
+`research/fixtures` from the process working directory; pass `--fixture-root`
+when launching from elsewhere:
+
+```powershell
+.\out\alicorn-history.exe C:\path\to\another-repository --self-test --fixture-root C:\path\to\alicorn-history
+```
+
 ## Phase 1–5 scope
 
 - repository path and current branch summary;

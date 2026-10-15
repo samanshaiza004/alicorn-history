@@ -27,7 +27,7 @@ history_fold_large_fixture :: proc() -> string {
 	copy, _ := strings.clone(strings.to_string(b))
 	return copy
 }
-history_test_patch_projection :: proc(failures: ^int, repository: string) {
+history_test_patch_projection :: proc(failures: ^int, fixture_root: string) {
 	large := history_fold_large_fixture()
 	defer delete(large)
 	fixtures := [?]Patch_Projection_Fixture{
@@ -43,7 +43,7 @@ history_test_patch_projection :: proc(failures: ^int, repository: string) {
 	for fixture in fixtures {
 		fixture_bytes: []byte
 		if len(fixture.path) > 0 {
-			fixture_path, path_error := filepath.join({repository, fixture.path}, context.allocator)
+			fixture_path, path_error := filepath.join({fixture_root, fixture.path}, context.allocator)
 			history_test_expect(failures, path_error == nil, "large real patch fixture path resolves")
 			if path_error != nil { continue }
 			read_bytes, read_error := os.read_entire_file_from_path(fixture_path, context.allocator)

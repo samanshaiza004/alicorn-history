@@ -1041,7 +1041,7 @@ history_test_clean_object_id :: proc(value: string) -> bool {
 	return len(value) > 0
 }
 
-history_run_tests :: proc(repository: string) -> bool {
+history_run_tests :: proc(repository, fixture_root: string) -> bool {
 	failures := 0
 	subdirectory := fmt.tprintf("%s/out", repository)
 	if os.is_dir(subdirectory) {
@@ -1077,7 +1077,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_detail_generation_domains(&failures)
 	history_test_file_stats(&failures)
 	history_test_patch_parser(&failures)
-	history_test_patch_projection(&failures, repository)
+	history_test_patch_projection(&failures, fixture_root)
 	history_test_patch_generation(&failures)
 	history_test_large_patch(&failures)
 	history_test_patch_hunk_navigation(&failures)

@@ -8,20 +8,51 @@ import host "vendor/alicorn/native/sdl_gpu"
 
 main :: proc() {
 	repository := "."
-	for argument in os.args[1:] {
-		if !strings.has_prefix(argument, "--") { repository = argument; break }
+	fixture_root := "."
+	repository_was_set := false
+	argument_index := 1
+	for argument_index < len(os.args) {
+		argument := os.args[argument_index]
+		if argument == "--fixture-root" {
+			if argument_index+1 >= len(os.args) {
+				fmt.println("alicorn-history: --fixture-root requires a directory")
+				os.exit(1)
+			}
+			fixture_root = os.args[argument_index+1]
+			argument_index += 2
+			continue
+		}
+		fixture_root_prefix := "--fixture-root="
+		if strings.has_prefix(argument, fixture_root_prefix) {
+			fixture_root = argument[len(fixture_root_prefix):]
+			argument_index += 1
+			continue
+		}
+		if !repository_was_set && !strings.has_prefix(argument, "--") {
+			repository = argument
+			repository_was_set = true
+		}
+		argument_index += 1
 	}
 	if !path_exists(repository) {
 		fmt.println("alicorn-history: repository does not exist:", repository)
 		os.exit(1)
 	}
 	if has_argument("--self-test") {
-		if !history_run_tests(repository) { os.exit(1) }
+		if !path_exists(fixture_root) {
+			fmt.println("alicorn-history: test fixture root does not exist:", fixture_root)
+			os.exit(1)
+		}
+		if !history_run_tests(repository, fixture_root) { os.exit(1) }
 		return
 	}
 	if has_argument("--self-test-folding") {
+		if !path_exists(fixture_root) {
+			fmt.println("alicorn-history: test fixture root does not exist:", fixture_root)
+			os.exit(1)
+		}
 		failures := 0
-		history_test_patch_projection(&failures, repository)
+		history_test_patch_projection(&failures, fixture_root)
 		if failures > 0 { os.exit(1) }
 		fmt.println("History folding PASS")
 		return
