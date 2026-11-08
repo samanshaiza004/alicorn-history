@@ -30,6 +30,17 @@ HISTORY_METADATA_GRID_HEIGHT :: f32(4*HISTORY_METADATA_ROW_HEIGHT + 3*HISTORY_ME
 HISTORY_HUNK_TOOLBAR_WIDE_MIN_WIDTH :: f32(420)
 HISTORY_HUNK_PREVIOUS_ACTION_ID :: alicorn.Semantic_ID{namespace=0x484953544F5259, value=1}
 HISTORY_HUNK_NEXT_ACTION_ID :: alicorn.Semantic_ID{namespace=0x484953544F5259, value=2}
+HISTORY_COMMIT_COLLECTION_ID :: alicorn.Semantic_ID{namespace=0x484953544F5259, value=0x434F4D4D495453}
+
+history_commit_semantic_id :: proc(commit_id: string) -> alicorn.Semantic_ID {
+	// Git object IDs are stable row identities across filtering and scrolling.
+	value: u64 = 1469598103934665603
+	for i := 0; i < len(commit_id); i += 1 {
+		value = (value ~ u64(commit_id[i])) * 1099511628211
+	}
+	if value == 0 { value = 1 }
+	return alicorn.Semantic_ID{namespace=HISTORY_COMMIT_COLLECTION_ID.namespace, value=value}
+}
 
 history_hunk_navigation_button :: proc(
 	ui: ^alicorn.UI,
@@ -443,8 +454,33 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 		style=alicorn.layout_style(grow=1, clip=true),
 		label="history-commit-list",
 		axes=.Vertical,
+		focusable=true,
 	)
 	app.history_scroll_node = commit_list.scroll.id
+	selected_semantic_id := alicorn.Semantic_ID{}
+	if app.has_selection && app.selected_commit_index >= 0 && app.selected_commit_index < len(app.commits) {
+		for commit_index in app.visible {
+			if commit_index == app.selected_commit_index {
+				selected_semantic_id = history_commit_semantic_id(app.commits[commit_index].id)
+				break
+			}
+		}
+	}
+	collection_actions := alicorn.semantic_actions_add({}, .Scroll_Forward)
+	collection_actions = alicorn.semantic_actions_add(collection_actions, .Scroll_Backward)
+	commit_collection := alicorn.semantic_collection_begin(
+		&ui,
+		commit_list.scroll.id,
+		HISTORY_COMMIT_COLLECTION_ID,
+		.List,
+		"Commits",
+		u64(len(app.visible)),
+		selected_id=selected_semantic_id,
+		current_id=selected_semantic_id,
+		realized_first=u64(commit_list.first),
+		realized_last=u64(commit_list.last),
+		actions=collection_actions,
+	)
 	commit_graph_first = commit_list.first
 	commit_graph_last = commit_list.last
 	app.commit_graph_node = 0
@@ -474,6 +510,15 @@ history_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logica
 			style=alicorn.layout_style(.Row, height=HISTORY_COMMIT_ROW_HEIGHT, padding=0),
 			content_style=alicorn.button_content_style(.Start, padding_x=4, padding_y=4),
 		)
+		row_states := alicorn.Semantic_States{}
+		if selected { row_states = alicorn.semantic_states_add(row_states, .Selected) }
+		_ = alicorn.semantic_collection_item(&ui, commit_collection, u64(position), alicorn.Semantic_Node_Description{
+			id=history_commit_semantic_id(commit.id),
+			role=.List_Item,
+			label=label,
+			states=row_states,
+			actions=alicorn.Semantic_Actions{.Focus, .Scroll_Into_View},
+		})
 		_ = alicorn.visual_part_attach(&ui, commit_row, commit_row,
 			alicorn.visual_part_extension_id("app.history", "commit-row"))
 		alicorn.container_begin(&ui, .Container, label="history-commit-row-content",

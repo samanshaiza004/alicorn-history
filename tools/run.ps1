@@ -24,7 +24,7 @@ $AccessKitLibraryDirectory = Split-Path -Parent $AccessKit.Library
 $AccessKitLinkerFlags = "/LIBPATH:$AccessKitLibraryDirectory bcrypt.lib ntdll.lib propsys.lib runtimeobject.lib uiautomationcore.lib userenv.lib ws2_32.lib"
 
 New-Item -ItemType Directory -Force -Path 'out' | Out-Null
-& $Odin build . "-extra-linker-flags:$AccessKitLinkerFlags" -out:out\alicorn-history.exe
+& $Odin build . "-collection:alicorn=vendor\alicorn" "-extra-linker-flags:$AccessKitLinkerFlags" -out:out\alicorn-history.exe
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $odinRoot = Split-Path -Parent $Odin

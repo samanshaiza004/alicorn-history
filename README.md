@@ -53,6 +53,13 @@ The Windows record covers a local build, native launch, selected-commit detail
 and patch loading, and a true-idle proof. This repository does not currently
 run Windows CI.
 
+The self-test also dogfoods Alicorn's public `alicorn:testui` harness against
+History's production `history_build` and `history_on_key` callbacks. It clicks
+the commit list, pages through the history, and verifies through semantic and
+layout snapshots that the selected commit is realized inside the list viewport.
+This check runs without opening a window or creating a GPU device; native smoke
+continues to cover the SDL host separately.
+
 ## Phase 1–5 scope
 
 - repository path and current branch summary;

@@ -7,6 +7,7 @@ import "core:sync/chan"
 import "core:strings"
 import "core:time"
 import alicorn "vendor/alicorn/runtime"
+import testui "vendor/alicorn/testui"
 
 HISTORY_TEST_FONT :: #load("vendor/alicorn/assets/fonts/AtkinsonHyperlegibleNext-Variable.ttf")
 
@@ -1041,6 +1042,93 @@ history_test_clean_object_id :: proc(value: string) -> bool {
 	return len(value) > 0
 }
 
+history_test_headless_page_down_reveals_selected_commit :: proc(failures: ^int, repository: string) {
+	app := history_app_new(repository)
+	if app == nil {
+		history_test_expect(failures, false, "headless History fixture allocates application state")
+		return
+	}
+	defer {
+		history_app_destroy(app)
+		free(app)
+	}
+	app.loading = false
+	app.branch, _ = strings.clone("main")
+	app.commits = make([dynamic]Commit, 0, 48)
+	for i := 0; i < 48; i += 1 {
+		id := fmt.tprintf("%040x", i+1)
+		subject := fmt.tprintf("headless History commit %d", i+1)
+		commit := Commit{}
+		commit.id, _ = strings.clone(id)
+		commit.subject, _ = strings.clone(subject)
+		if i > 0 {
+			parent, _ := strings.clone(app.commits[i-1].id)
+			append(&commit.parents, parent)
+		}
+		append(&app.commits, commit)
+	}
+	app.dag = commit_dag_layout(app.commits[:])
+	app.dag_generation = 1
+	history_rebuild_visible(app)
+	history_select_visible_index(app, 0)
+
+	h, status := testui.open(
+		app,
+		width=1200,
+		height=800,
+		on_key=history_on_key,
+		build_application=history_build,
+	)
+	defer if h.runtime != nil { testui.close(&h) }
+	if status != .Ok {
+		history_test_expect(failures, false,
+			fmt.tprintf("headless History application stabilizes: %s", testui.last_turn_diagnostic(&h)))
+		return
+	}
+	list := testui.find(&h, testui.Query{role=.List, name="Commits", match_role=true, match_name=true})
+	defer testui.destroy_find_result(&list)
+	if list.match != .Unique || !list.element.scroll_geometry_resolved {
+		history_test_expect(failures, false,
+			"the real History commit list is exposed through semantic layout queries")
+		return
+	}
+	initial_commit := app.commits[app.selected_commit_index]
+	initial_label := fmt.tprintf("%s  %s", commit_short_id(initial_commit), initial_commit.subject)
+	initial_row := testui.find(&h, testui.Query{role=.List_Item, name=initial_label, match_role=true, match_name=true})
+	if initial_row.match != .Unique || testui.click(&h, &initial_row.element) != .Ok {
+		history_test_expect(failures, false,
+			fmt.tprintf("the selected commit row can receive physical input: %s", testui.last_turn_diagnostic(&h)))
+		testui.destroy_find_result(&initial_row)
+		return
+	}
+	testui.destroy_find_result(&initial_row)
+	initial_id := app.selected_id
+	for _ in 0..<2 {
+		if testui.step(&h, testui.Input{kind=.Key, key=.Page_Down}) != .Ok {
+			history_test_expect(failures, false,
+				fmt.tprintf("Page Down reaches History's production callback: %s", testui.last_turn_diagnostic(&h)))
+			return
+		}
+	}
+	history_test_expect(failures, app.has_selection && app.selected_id != initial_id,
+		"Page Down changes the selected commit in the real History application")
+	if !app.has_selection || app.selected_commit_index < 0 || app.selected_commit_index >= len(app.commits) { return }
+	selected_commit := app.commits[app.selected_commit_index]
+	selected_label := fmt.tprintf("%s  %s", commit_short_id(selected_commit), selected_commit.subject)
+	selected := testui.find(&h, testui.Query{role=.List_Item, name=selected_label, match_role=true, match_name=true})
+	defer testui.destroy_find_result(&selected)
+	if selected.match != .Unique || !selected.element.has_bounds {
+		history_test_expect(failures, false,
+			"the selected commit is realized after repeated Page Down input")
+		return
+	}
+	row := selected.element.bounds
+	viewport := list.element.scroll_viewport_bounds
+	inside := row.y >= viewport.y-0.01 && row.y+row.h <= viewport.y+viewport.h+0.01
+	history_test_expect(failures, inside,
+		"the selected History commit row is fully inside the finalized scroll viewport")
+}
+
 history_run_tests :: proc(repository: string) -> bool {
 	failures := 0
 	subdirectory := fmt.tprintf("%s/out", repository)
@@ -1082,6 +1170,7 @@ history_run_tests :: proc(repository: string) -> bool {
 	history_test_patch_hunk_navigation(&failures)
 	history_test_ref_selection_visibility(&failures)
 	history_test_view_layout_and_focus(&failures)
+	history_test_headless_page_down_reveals_selected_commit(&failures, repository)
 	history_test_detail_grid_resize(&failures)
 	history_test_dag_geometry(&failures)
 	history_test_large_dag_virtual_projection(&failures)
