@@ -1113,6 +1113,13 @@ history_test_headless_page_down_reveals_selected_commit :: proc(failures: ^int, 
 	history_test_expect(failures, app.has_selection && app.selected_id != initial_id,
 		"Page Down changes the selected commit in the real History application")
 	if !app.has_selection || app.selected_commit_index < 0 || app.selected_commit_index >= len(app.commits) { return }
+	current_list := testui.find(&h, testui.Query{role=.List, name="Commits", match_role=true, match_name=true})
+	defer testui.destroy_find_result(&current_list)
+	if current_list.match != .Unique || !current_list.element.scroll_geometry_resolved {
+		history_test_expect(failures, false,
+			"the History list exposes fresh finalized viewport geometry after paging")
+		return
+	}
 	selected_commit := app.commits[app.selected_commit_index]
 	selected_label := fmt.tprintf("%s  %s", commit_short_id(selected_commit), selected_commit.subject)
 	selected := testui.find(&h, testui.Query{role=.List_Item, name=selected_label, match_role=true, match_name=true})
@@ -1123,7 +1130,7 @@ history_test_headless_page_down_reveals_selected_commit :: proc(failures: ^int, 
 		return
 	}
 	row := selected.element.bounds
-	viewport := list.element.scroll_viewport_bounds
+	viewport := current_list.element.scroll_viewport_bounds
 	inside := row.y >= viewport.y-0.01 && row.y+row.h <= viewport.y+viewport.h+0.01
 	history_test_expect(failures, inside,
 		"the selected History commit row is fully inside the finalized scroll viewport")
